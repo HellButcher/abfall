@@ -153,25 +153,37 @@ GcPtr::drop() DOES decrement
 ```
 
 ### 3.2 Fix Implementation Steps
-1. Change GcHeader::new() to start with root_count=1
-2. Update GcPtr::new() to NOT call inc_root() 
-3. Verify GcPtr::clone() calls inc_root() ✓
-4. Verify GcPtr::drop() calls dec_root() ✓
+1. ✅ Change GcHeader::new() to start with root_count=1
+2. ✅ Update GcPtr::new() to NOT call inc_root() 
+3. ✅ Verify GcPtr::clone() calls inc_root()
+4. ✅ Verify GcPtr::drop() calls dec_root()
 
 ### 3.3 Testing Strategy
-- [ ] Test concurrent allocation during collection
-- [ ] Test object allocation in tight loop with concurrent GC
-- [ ] Stress test with many threads allocating
-- [ ] Verify no premature collection
+- ✅ Test concurrent allocation during collection
+- ✅ Test object allocation in tight loop with concurrent GC
+- ✅ Stress test with many threads allocating
+- ✅ Verify no premature collection
 
-### 3.4 Alternative: Black Allocation During Marking
+### 3.4 Implementation Results
+**Completed:**
+- heap.rs: root_count starts at 1 in GcHeader::new()
+- ptr.rs: GcPtr::new() no longer calls inc_root()
+- Tests: simple_safety.rs, allocation_safety.rs
+- All tests passing ✓
+
+**Impact:**
+- Thread-safe allocation
+- No race window for premature collection
+- Critical correctness fix for concurrent GC
+
+### 3.5 Alternative: Black Allocation During Marking
 **Future consideration for incremental GC:**
 - Track GC phase (Idle, Marking, Sweeping)
 - Allocate as Black during Marking phase
 - Allocate as White during Idle/Sweeping
 - Provides stronger guarantees for incremental collection
 
-## Phase 4: VTable-Based Type Erasure & Box Allocation
+## Phase 4: VTable-Based Type Erasure & Box Allocation ✅ COMPLETE
 
 **Priority: HIGH - Fix memory management architecture**
 
@@ -200,53 +212,114 @@ dealloc(current as *mut u8, layout);        // Manual dealloc
 3. Types with `Drop` implementations leak resources
 4. No type safety guarantees
 
-### 4.2 Solution: VTable + Box Allocation
+### 4.2 Solution Implemented: VTable + Box Allocation
 
-**VTable Design:**
+**Final Design (with improvements):**
 ```rust
 /// Type-erased vtable for GC operations
 pub struct GcVTable {
-    /// Trace function for marking
-    pub trace: unsafe fn(*const GcHeader, &mut Vec<*const GcHeader>),
+    /// Trace function - takes Tracer directly
+    pub trace: unsafe fn(*const GcHeader, &mut Tracer),
     /// Drop function - uses Box::from_raw
     pub drop: unsafe fn(*mut GcHeader),
-    /// Size for statistics
-    pub size: usize,
-    /// Alignment requirement
-    pub align: usize,
+    /// Layout of GcBox<T>
+    pub layout: Layout,
 }
 
 impl GcVTable {
-    pub const fn new<T: Trace>() -> &'static Self {
-        &GcVTable {
+    pub fn new<T: Trace>() -> Self {
+        // trace_impl and drop_impl defined here
+        unsafe fn trace_impl<T: Trace>(ptr: *const GcHeader, tracer: &mut Tracer) {
+            // Use offset_of! for safety
+            let gc_box_ptr = (ptr as *const u8)
+                .sub(std::mem::offset_of!(GcBox<T>, header))
+                as *const GcBox<T>;
+            (*gc_box_ptr).data.trace(tracer);  // Direct delegation
+        }
+        
+        unsafe fn drop_impl<T>(ptr: *mut GcHeader) {
+            // Use offset_of! for safety
+            let gc_box_ptr = (ptr as *mut u8)
+                .sub(std::mem::offset_of!(GcBox<T>, header))
+                as *mut GcBox<T>;
+            let _box = Box::from_raw(gc_box_ptr);
+        }
+        
+        Self {
             trace: trace_impl::<T>,
             drop: drop_impl::<T>,
-            size: std::mem::size_of::<GcBox<T>>(),
-            align: std::mem::align_of::<GcBox<T>>(),
+            layout: Layout::new::<GcBox<T>>(),
         }
     }
 }
 
-unsafe fn drop_impl<T>(ptr: *mut GcHeader) {
-    let gc_box_ptr = ptr as *mut GcBox<T>;
-    let _box = Box::from_raw(gc_box_ptr);
-    // Box::drop automatically called!
+// GcBox is repr(C) for safety
+#[repr(C)]
+pub struct GcBox<T: ?Sized> {
+    pub header: GcHeader,
+    pub data: T,
 }
 ```
 
+**Key Improvements:**
+- ✅ Use `Layout` instead of separate size/align
+- ✅ No VTable helper struct (just GcVTable)
+- ✅ trace_impl/drop_impl inside GcVTable::new()
+- ✅ trace takes `&mut Tracer` directly
+- ✅ Direct delegation to `Trace::trace`
+- ✅ `#[repr(C)]` on GcBox for memory safety
+- ✅ `offset_of!` for safe pointer casts
+- ✅ Compile-time assertion verifying offset
+
 **Benefits:**
-- Proper Drop semantics
-- No Layout recomputation
-- Type-safe deallocation
-- Cached size information
+- ✅ Proper Drop semantics for ALL types
+- ✅ No Layout recomputation during sweep
+- ✅ Type-safe memory management  
+- ✅ Cached Layout in vtable
+- ✅ Memory-safe pointer casts (repr(C) + offset_of!)
+- ✅ Idiomatic Rust (Box allocation)
+- ✅ Simpler code structure
 
-### 4.3 Implementation Steps
+### 4.3 Implementation Results
 
-1. [ ] Design GcVTable struct
-2. [ ] Update GcHeader with vtable field
-3. [ ] Rewrite GcBox::new using Box::new + leak
-4. [ ] Update sweep to use vtable.drop
-5. [ ] Test with Drop types (String, Vec, etc.)
+**Completed:**
+- ✅ GcVTable with Layout field
+- ✅ trace_impl/drop_impl inside GcVTable::new()
+- ✅ Direct Tracer delegation (no gray_queue parameter)
+- ✅ Box::new + leak for allocation
+- ✅ Box::from_raw for proper Drop
+- ✅ #[repr(C)] on GcBox
+- ✅ offset_of! calculations
+- ✅ Compile-time offset assertion
+
+**Files Changed:**
+- heap.rs: Complete GcVTable implementation
+- heap.rs: Box-based GcBox::new()
+- heap.rs: Sweep uses vtable.drop
+- heap.rs: Mark uses vtable.trace with Tracer
+- gc.rs: Simplified allocate()
+- ptr.rs: Direct field access
+
+**Tests:**
+- ✅ vtable_drop_test.rs: Custom Drop, String, Vec
+- ✅ All existing tests passing
+- ✅ No resource leaks detected
+
+**Commits:**
+- Commit 1: Initial VTable + Box implementation
+- Commit 2: Memory safety (repr(C) + offset_of!)
+
+### 4.4 Implementation Steps (Completed)
+
+1. ✅ Define GcVTable structure with Layout
+2. ✅ Implement trace_impl/drop_impl inside new()
+3. ✅ Update GcHeader to store vtable reference
+4. ✅ Rewrite GcBox::new to use Box
+5. ✅ Update sweep to use vtable.drop
+6. ✅ Remove all direct alloc/dealloc calls
+7. ✅ Add repr(C) for memory safety
+8. ✅ Use offset_of! for pointer casts
+9. ✅ Test with Drop types (String, Vec, custom)
 
 ## Phase 5: Incremental/Concurrent Marking (Inspired by Go GC)
 
@@ -531,20 +604,23 @@ struct WriteBarrier {
 
 ## Implementation Status
 
-### ✅ Completed
+### ✅ Completed (4/7 Phases)
 - **Phase 1:** Core data structures (lock-free list, type-erased headers)
 - **Phase 2:** Trace trait system (graph traversal)
+- **Phase 3:** Allocation safety (root_count=1, no race window)
+- **Phase 4:** VTable + Box allocation (proper Drop, memory safety)
 
-### 🔄 Next Priority (Critical)
-- **Phase 3:** Allocation safety fixes (race conditions)
-- **Phase 4:** VTable + Box allocation (proper Drop semantics)
-
-### 📚 Planned (Go GC-Inspired)
-- **Phase 5:** Incremental/concurrent marking
+### 🔄 Next Priority
+- **Phase 5:** Incremental/concurrent marking (Go GC-inspired)
   - Phase state machine (Idle/Marking/Sweeping)
   - Work-based incremental marking
   - Write barriers (hybrid Dijkstra + Yuasa)
   - Pacer/trigger heuristics
+  - Background marking thread
+
+### 📚 Future Work
+- **Phase 6:** Write barriers & GcCell integration
+- **Phase 7:** Optimization and tuning
   - Background marking thread
 - **Phase 6:** Write barriers & GcCell integration
 - **Phase 7:** Optimization and tuning
@@ -556,10 +632,36 @@ struct WriteBarrier {
 
 ## Current Branch Status
 - Branch: `feat/improved-gc`
-- Commits: 4 (clean history)
-- Tests: All passing
-- Ready for: Phase 3 (Allocation Safety) + Phase 4 (VTable)
+- Commits: 8 (clean history)
+- Tests: All passing ✓
+- Ready for: Phase 5 (Incremental Marking)
 - Research: Go GC design study for Phase 5
+
+## Key Achievements (Phases 3 & 4)
+
+**Phase 3: Allocation Safety**
+- Fixed critical race condition in allocation
+- Objects start rooted (root_count=1)
+- GcPtr::new() doesn't increment
+- Prevents premature collection
+- Tests: simple_safety.rs, allocation_safety.rs
+
+**Phase 4: VTable + Box Allocation**
+- Replaced manual alloc/dealloc with Box
+- GcVTable with Layout field
+- trace_impl/drop_impl inside new()
+- Direct Tracer delegation
+- #[repr(C)] + offset_of! for safety
+- Compile-time offset assertion
+- Proper Drop for all types (String, Vec, custom)
+- Tests: vtable_drop_test.rs
+
+**Code Quality:**
+- 8 clean semantic commits
+- Comprehensive test coverage
+- Memory-safe pointer operations
+- Idiomatic Rust patterns
+- Zero resource leaks
 
 ## Key Insights from Go GC Design
 
