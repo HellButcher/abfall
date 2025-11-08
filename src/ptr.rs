@@ -35,7 +35,7 @@ impl<T> GcPtr<T> {
     /// The returned pointer is only valid as long as this `GcPtr`
     /// or another `GcPtr` to the same object exists.
     pub fn as_ptr(&self) -> *const T {
-        unsafe { self.ptr.as_ref().data() as *const T }
+        unsafe { &self.ptr.as_ref().data as *const T }
     }
     
     /// Get the header pointer for this object
@@ -48,7 +48,7 @@ impl<T> Deref for GcPtr<T> {
     type Target = T;
 
     fn deref(&self) -> &Self::Target {
-        unsafe { self.ptr.as_ref().data() }
+        unsafe { &self.ptr.as_ref().data }
     }
 }
 

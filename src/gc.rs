@@ -116,17 +116,8 @@ impl GcContext {
     /// let text = ctx.allocate("Hello");
     /// ```
     pub fn allocate<T: Trace>(self: &Arc<Self>, data: T) -> GcPtr<T> {
-        // Create a type-specific trace function
-        unsafe fn trace_impl<T: Trace>(ptr: *const crate::heap::GcHeader, gray_queue: &mut Vec<*const crate::heap::GcHeader>) {
-            let gc_box = ptr as *const crate::heap::GcBox<T>;
-            let data = &(*gc_box).data;
-            let mut tracer = Tracer::new();
-            data.trace(&mut tracer);
-            // Merge tracer's gray queue into the main gray queue
-            gray_queue.extend(tracer.gray_queue_mut().drain(..));
-        }
-        
-        let ptr = self.heap.allocate(data, trace_impl::<T>);
+        // Allocation now uses Box internally - vtable handles everything!
+        let ptr = self.heap.allocate(data);
         GcPtr::new(ptr, Arc::clone(&self.heap))
     }
 

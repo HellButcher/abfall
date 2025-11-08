@@ -4,10 +4,63 @@
 //! and implements the mark and sweep phases of garbage collection.
 
 use crate::color::{AtomicColor, Color};
-use std::alloc::{alloc, dealloc, Layout};
+use crate::trace::{Trace, Tracer};
+use std::alloc::Layout;
 use std::ptr::{null_mut, NonNull};
 use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
 use std::sync::Arc;
+
+/// Type-erased virtual table for GC operations
+///
+/// This vtable contains all type-specific operations needed for GC,
+/// stored statically to avoid per-object overhead.
+pub struct GcVTable {
+    /// Trace function for marking reachable objects
+    pub trace: unsafe fn(*const GcHeader, &mut Tracer),
+    
+    /// Drop function - properly drops the object using Box::from_raw
+    pub drop: unsafe fn(*mut GcHeader),
+    
+    /// Layout of the complete GcBox<T>
+    pub layout: Layout,
+}
+
+impl GcVTable {
+    /// Create a new vtable for type T
+    pub fn new<T: Trace>() -> Self {
+        unsafe fn trace_impl<T: Trace>(ptr: *const GcHeader, tracer: &mut Tracer) {
+            unsafe {
+                // Calculate GcBox pointer from header pointer using offset
+                // SAFETY: GcBox is repr(C) so header is at offset 0
+                let gc_box_ptr = (ptr as *const u8).sub(
+                    std::mem::offset_of!(GcBox<T>, header)
+                ) as *const GcBox<T>;
+                
+                let data = &(*gc_box_ptr).data;
+                data.trace(tracer);
+            }
+        }
+        
+        unsafe fn drop_impl<T>(ptr: *mut GcHeader) {
+            unsafe {
+                // Calculate GcBox pointer from header pointer using offset
+                // SAFETY: GcBox is repr(C) so header is at offset 0
+                let gc_box_ptr = (ptr as *mut u8).sub(
+                    std::mem::offset_of!(GcBox<T>, header)
+                ) as *mut GcBox<T>;
+                
+                let _box = Box::from_raw(gc_box_ptr);
+                // Box drops T here
+            }
+        }
+        
+        Self {
+            trace: trace_impl::<T>,
+            drop: drop_impl::<T>,
+            layout: Layout::new::<GcBox<T>>(),
+        }
+    }
+}
 
 /// Type-erased header for all GC objects
 ///
@@ -20,17 +73,20 @@ pub struct GcHeader {
     pub root_count: AtomicUsize,
     /// Next pointer in the intrusive linked list
     pub next: AtomicPtr<GcHeader>,
-    /// Type-erased trace function
-    pub trace_fn: unsafe fn(*const GcHeader, &mut Vec<*const GcHeader>),
+    /// Static vtable reference for type-erased operations
+    pub vtable: &'static GcVTable,
 }
 
 impl GcHeader {
-    pub fn new<T>(trace_fn: unsafe fn(*const GcHeader, &mut Vec<*const GcHeader>)) -> Self {
+    pub fn new<T: Trace>() -> Self {
+        // Leak a vtable for this type (in production, we'd cache these)
+        let vtable = Box::leak(Box::new(GcVTable::new::<T>()));
+        
         Self {
             color: AtomicColor::new(Color::White),
             root_count: AtomicUsize::new(1),  // Start at 1 - already rooted! (allocation safety)
             next: AtomicPtr::new(null_mut()),
-            trace_fn,
+            vtable,
         }
     }
 
@@ -50,30 +106,28 @@ impl GcHeader {
 /// A garbage collected object with metadata
 ///
 /// `GcBox` wraps a value with GC metadata including color and root status.
+/// 
+/// SAFETY: repr(C) ensures that `header` is always at offset 0, making it
+/// safe to cast between `*GcHeader` and `*GcBox<T>`.
+#[repr(C)]
 pub struct GcBox<T: ?Sized> {
     pub header: GcHeader,
     pub data: T,
 }
 
-impl<T> GcBox<T> {
-    pub fn new(data: T, trace_fn: unsafe fn(*const GcHeader, &mut Vec<*const GcHeader>)) -> NonNull<GcBox<T>> {
-        // TODO: use Box::into_raw for allocation
-        let layout = Layout::new::<GcBox<T>>();
-        unsafe {
-            let ptr = alloc(layout) as *mut GcBox<T>;
-            if ptr.is_null() {
-                panic!("Allocation failed");
-            }
-            ptr.write(GcBox {
-                header: GcHeader::new::<T>(trace_fn),
-                data,
-            });
-            NonNull::new_unchecked(ptr)
-        }
-    }
-
-    pub fn data(&self) -> &T {
-        &self.data
+impl<T: Trace> GcBox<T> {
+    /// Allocate a new GcBox using Box (idiomatic Rust!)
+    pub fn new(data: T) -> NonNull<GcBox<T>> {
+        // Compile-time assertion: header must be at offset 0 due to repr(C)
+        const _: () = assert!(std::mem::offset_of!(GcBox<()>, header) == 0);
+        
+        let gc_box = Box::new(GcBox {
+            header: GcHeader::new::<T>(),
+            data,
+        });
+        
+        // Leak the box to get a raw pointer
+        NonNull::from(Box::leak(gc_box))
     }
 }
 
@@ -99,9 +153,9 @@ impl Heap {
         })
     }
 
-    pub fn allocate<T>(&self, data: T, trace_fn: unsafe fn(*const GcHeader, &mut Vec<*const GcHeader>)) -> NonNull<GcBox<T>> {
-        let ptr = GcBox::new(data, trace_fn);
-        let size = std::mem::size_of::<GcBox<T>>();
+    pub fn allocate<T: Trace>(&self, data: T) -> NonNull<GcBox<T>> {
+        let ptr = GcBox::new(data);
+        let size = unsafe { (*ptr.as_ptr()).header.vtable.layout.size() };
         
         // Insert at head of linked list atomically
         let header_ptr = unsafe { &(*ptr.as_ptr()).header as *const GcHeader as *mut GcHeader };
@@ -159,8 +213,12 @@ impl Heap {
             unsafe {
                 let header = &*ptr;
                 
-                // Call the trace function to find children
-                (header.trace_fn)(ptr, &mut gray_queue);
+                // Create a tracer and call the trace function from vtable
+                let mut tracer = Tracer::new();
+                (header.vtable.trace)(ptr, &mut tracer);
+                
+                // Merge tracer's gray queue
+                gray_queue.extend(tracer.gray_queue_mut().drain(..));
                 
                 // Mark as black
                 header.color.store(Color::Black, Ordering::Release);
@@ -188,10 +246,10 @@ impl Heap {
                         (*(*prev)).next.store(next, Ordering::Release);
                     }
                     
-                    // Calculate layout and free
-                    let layout = Layout::for_value(&*current);
-                    freed += layout.size();
-                    dealloc(current as *mut u8, layout);
+                    // Get size from vtable and call drop function
+                    let size = header.vtable.layout.size();
+                    (header.vtable.drop)(current);  // Proper Drop via Box::from_raw!
+                    freed += size;
                     
                     current = next;
                 } else {
@@ -233,8 +291,10 @@ impl Drop for Heap {
             unsafe {
                 let header = &*current;
                 let next = header.next.load(Ordering::Acquire);
-                let layout = Layout::for_value(&*current);
-                dealloc(current as *mut u8, layout);
+                
+                // Use vtable drop for proper Drop semantics
+                (header.vtable.drop)(current);
+                
                 current = next;
             }
         }
