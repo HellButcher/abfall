@@ -5,6 +5,7 @@
 
 use crate::heap::Heap;
 use crate::ptr::GcPtr;
+use crate::trace::{Trace, Tracer};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
@@ -114,13 +115,18 @@ impl GcContext {
     /// let number = ctx.allocate(42);
     /// let text = ctx.allocate("Hello");
     /// ```
-    pub fn allocate<T>(self: &Arc<Self>, data: T) -> GcPtr<T> {
-        // Default trace function for types without Trace implementation
-        unsafe fn no_trace<T>(_ptr: *const crate::heap::GcHeader, _gray_queue: &mut Vec<*const crate::heap::GcHeader>) {
-            // No tracing needed for types without GC pointers
+    pub fn allocate<T: Trace>(self: &Arc<Self>, data: T) -> GcPtr<T> {
+        // Create a type-specific trace function
+        unsafe fn trace_impl<T: Trace>(ptr: *const crate::heap::GcHeader, gray_queue: &mut Vec<*const crate::heap::GcHeader>) {
+            let gc_box = ptr as *const crate::heap::GcBox<T>;
+            let data = &(*gc_box).data;
+            let mut tracer = Tracer::new();
+            data.trace(&mut tracer);
+            // Merge tracer's gray queue into the main gray queue
+            gray_queue.extend(tracer.gray_queue_mut().drain(..));
         }
         
-        let ptr = self.heap.allocate(data, no_trace::<T>);
+        let ptr = self.heap.allocate(data, trace_impl::<T>);
         GcPtr::new(ptr, Arc::clone(&self.heap))
     }
 

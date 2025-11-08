@@ -33,9 +33,11 @@ mod gc;
 mod color;
 mod heap;
 mod ptr;
+mod trace;
 
 pub use gc::{Gc, GcContext};
 pub use ptr::GcPtr;
+pub use trace::{Trace, NoTrace, Tracer};
 
 #[cfg(test)]
 mod tests {
