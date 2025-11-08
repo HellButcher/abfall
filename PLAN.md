@@ -5,11 +5,12 @@
 2. ✅ Reduce lock contention
 3. ✅ Use intrusive linked list for allocations
 4. ✅ Add Trace trait for object graph traversal
-5. Implement incremental tracing
+5. Implement incremental/concurrent marking (inspired by Go GC)
 6. Refine borrowing model (Rc/Arc-like)
 7. Add GcCell for write barriers
 8. **NEW:** Ensure allocation safety (objects rooted until linked)
 9. **NEW:** Use Box allocation + VTable for proper Drop semantics
+10. **NEW:** Apply Go GC design patterns (pacer, write barriers, phase tracking)
 
 ## Phase 1: Core Data Structure Improvements ✅ COMPLETE
 
@@ -247,17 +248,213 @@ unsafe fn drop_impl<T>(ptr: *mut GcHeader) {
 4. [ ] Update sweep to use vtable.drop
 5. [ ] Test with Drop types (String, Vec, etc.)
 
-## Phase 5: Incremental Marking
+## Phase 5: Incremental/Concurrent Marking (Inspired by Go GC)
 
-### 5.1 Work-Based Incremental Marking
-- Track marking progress
-- Limit work per increment (e.g., 100 objects)
-- Interleave with mutator (application code)
+**Design Reference: Go's Concurrent Mark & Sweep**
 
-### 5.2 Snapshot-At-Beginning (SATB)
-- Record pointer updates during marking
-- Use write barrier to maintain snapshot
-- Ensures no objects are lost during concurrent marking
+Go's GC provides excellent inspiration for concurrent collection with minimal pauses.
+Key insights from Go's design that apply to our implementation:
+
+### 5.1 Go GC Architecture Overview
+
+**Go's Tri-Color Marking:**
+- White: Potentially unreachable (not yet scanned)
+- Grey: Reachable but not yet scanned (work queue)
+- Black: Reachable and fully scanned
+- Sound familiar? We already have this! ✓
+
+**Go's Collection Phases:**
+1. **Sweep Termination**: Finish any outstanding sweep work
+2. **Mark Phase**: Concurrent marking with write barriers
+3. **Mark Termination**: Stop-the-world to complete marking
+4. **Sweep Phase**: Concurrent sweeping
+
+**Key Innovations from Go:**
+- Write barriers enable concurrent marking
+- Pacer controls GC based on heap growth
+- Stack scanning during STW windows
+- Hybrid barrier (Dijkstra + Yuasa)
+
+### 5.2 Applying Go's Design to Rust
+
+**Phase State Machine:**
+```rust
+pub enum GcPhase {
+    Idle,           // No GC in progress
+    Marking,        // Concurrent marking active
+    MarkTermination,// Final mark pass (brief pause)
+    Sweeping,       // Concurrent sweep
+}
+
+pub struct GcState {
+    phase: AtomicU8,  // Current GC phase
+    work_available: AtomicBool,
+    bytes_marked: AtomicUsize,
+    bytes_allocated_since_gc: AtomicUsize,
+}
+```
+
+**Concurrent Marking (inspired by Go):**
+```rust
+// Mark work can be split across multiple calls
+pub fn do_mark_work(&self, work_budget: usize) -> bool {
+    let mut work_done = 0;
+    
+    while work_done < work_budget {
+        match self.gray_queue.try_pop() {
+            Some(obj) => {
+                unsafe { ((*obj).vtable.trace)(obj, &mut self.gray_queue); }
+                (*obj).color.store(Color::Black, Ordering::Release);
+                work_done += 1;
+            }
+            None => return true, // Marking complete
+        }
+    }
+    
+    false // More work remains
+}
+```
+
+### 5.3 Write Barriers (Go's Hybrid Barrier Approach)
+
+**Go uses a hybrid barrier combining:**
+- **Dijkstra barrier**: shade on pointer write
+- **Yuasa barrier**: shade old value before overwrite
+
+**Our Implementation:**
+```rust
+pub struct WriteBarrier {
+    gc_phase: Arc<AtomicU8>,
+}
+
+impl WriteBarrier {
+    /// Called before updating a pointer field
+    pub fn record_write<T>(&self, old_value: Option<&GcPtr<T>>) {
+        // Only barrier during marking phase
+        if self.gc_phase.load(Ordering::Relaxed) == GcPhase::Marking as u8 {
+            // Shade the old value (Yuasa-style)
+            if let Some(old) = old_value {
+                let header = old.header_ptr();
+                unsafe {
+                    if (*header).color.load(Ordering::Acquire) == Color::White {
+                        (*header).color.store(Color::Gray, Ordering::Release);
+                        // Add to gray queue for rescanning
+                    }
+                }
+            }
+        }
+    }
+}
+```
+
+### 5.4 Pacer/Trigger Heuristics (Go-style)
+
+**Go's pacer aims to:**
+- Finish marking before heap doubles
+- Smooth GC CPU usage over time
+- Minimize pause times
+
+**Our Implementation:**
+```rust
+pub struct GcPacer {
+    /// Target heap size to trigger GC
+    goal: AtomicUsize,
+    /// Heap size at last GC
+    marked_heap_size: AtomicUsize,
+    /// Growth factor before triggering (e.g., 1.0 = 100% growth)
+    gc_percent: f64,
+}
+
+impl GcPacer {
+    pub fn should_trigger_gc(&self, current_heap: usize) -> bool {
+        let goal = self.goal.load(Ordering::Relaxed);
+        current_heap >= goal
+    }
+    
+    pub fn update_after_gc(&self, marked_bytes: usize) {
+        self.marked_heap_size.store(marked_bytes, Ordering::Relaxed);
+        // Next GC triggers at marked_size * (1 + gc_percent)
+        let goal = marked_bytes + (marked_bytes as f64 * self.gc_percent) as usize;
+        self.goal.store(goal, Ordering::Relaxed);
+    }
+}
+```
+
+### 5.5 Implementation Roadmap
+
+**Step 1: Add Phase Tracking**
+- [ ] Implement GcPhase enum and state machine
+- [ ] Track current phase atomically
+- [ ] Update allocation to check phase
+
+**Step 2: Split Mark Phase**
+- [ ] Convert mark phase to incremental work units
+- [ ] Implement work budget system
+- [ ] Add gray queue management for concurrent access
+
+**Step 3: Implement Write Barriers**
+- [ ] Add write barrier to GcCell
+- [ ] Implement Yuasa-style old value shading
+- [ ] Test barrier correctness with concurrent mutations
+
+**Step 4: Concurrent Sweep**
+- [ ] Make sweep interruptible
+- [ ] Allow allocation during sweep (different color space)
+- [ ] Handle sweep/allocate races
+
+**Step 5: Pacer Integration**
+- [ ] Implement GcPacer with Go-style heuristics
+- [ ] Tune gc_percent parameter (start with 100%)
+- [ ] Add metrics for pause times
+
+**Step 6: Background Goroutine (Thread) Support**
+- [ ] Dedicated GC thread for background marking
+- [ ] Assist mechanism: mutator helps when heap pressure high
+- [ ] Coordinate with application threads
+
+### 5.6 Key Differences from Go
+
+**What we can adopt:**
+- ✓ Tri-color marking (already have!)
+- ✓ Concurrent marking with write barriers
+- ✓ Phase-based state machine
+- ✓ Pacer heuristics for triggering
+- ✓ Incremental work budget system
+
+**What's different in Rust:**
+- **No stack scanning**: Rust has no GC pointers on stack (only GcPtr)
+- **Simpler roots**: Only GcPtr root_count, not stack roots
+- **Type safety**: Trace trait ensures correctness at compile time
+- **No finalizers**: Drop is deterministic, not GC-dependent
+
+### 5.7 Performance Goals (Go-inspired)
+
+**Go achieves:**
+- Sub-millisecond pause times
+- ~25% CPU overhead for GC
+- Scales to multi-GB heaps
+
+**Our targets:**
+- <1ms pause times for mark termination
+- <10% CPU overhead for concurrent marking
+- Support heaps up to 1GB efficiently
+
+### 5.8 References & Further Reading
+
+**Go GC Documentation:**
+- [Go GC Guide](https://tip.golang.org/doc/gc-guide)
+- [Go 1.5 Concurrent GC Design](https://go.dev/blog/go15gc)
+- [Getting to Go: The Journey of Go's GC](https://go.dev/blog/ismmkeynote)
+
+**Academic Papers:**
+- "On-the-Fly Garbage Collection" (Dijkstra et al., 1978)
+- "Real-time Garbage Collection" (Baker, 1978)
+- Yuasa's Snapshot-at-Beginning algorithm
+
+**Implementation Insights:**
+- Study `runtime/mgc.go` in Go source
+- Write barrier implementation in `runtime/mbarrier.go`
+- Pacer logic in `runtime/mgcpacer.go`
 
 ## Phase 6: Improved Borrowing Model & Write Barriers
 
@@ -335,18 +532,54 @@ struct WriteBarrier {
 ## Implementation Status
 
 ### ✅ Completed
-- **Step 1:** Core data structures (lock-free list, type-erased headers)
-- **Step 2:** Trace trait system (graph traversal)
+- **Phase 1:** Core data structures (lock-free list, type-erased headers)
+- **Phase 2:** Trace trait system (graph traversal)
 
-### 🔄 Next Priority
-- **Step 3:** Allocation safety fixes (CRITICAL - race conditions)
-- **Step 4:** VTable + Box allocation (CRITICAL - proper Drop semantics)
-- **Step 5:** Incremental marking
-- **Step 6:** Write barriers & GcCell
-- **Step 7:** Optimization pass
+### 🔄 Next Priority (Critical)
+- **Phase 3:** Allocation safety fixes (race conditions)
+- **Phase 4:** VTable + Box allocation (proper Drop semantics)
+
+### 📚 Planned (Go GC-Inspired)
+- **Phase 5:** Incremental/concurrent marking
+  - Phase state machine (Idle/Marking/Sweeping)
+  - Work-based incremental marking
+  - Write barriers (hybrid Dijkstra + Yuasa)
+  - Pacer/trigger heuristics
+  - Background marking thread
+- **Phase 6:** Write barriers & GcCell integration
+- **Phase 7:** Optimization and tuning
+
+### 📖 Research References Added
+- Go GC guide and blog posts
+- Academic papers (Dijkstra, Baker, Yuasa)
+- Go runtime source code references
 
 ## Current Branch Status
 - Branch: `feat/improved-gc`
-- Commits: 2 (clean history)
+- Commits: 4 (clean history)
 - Tests: All passing
-- Ready for: Phase 3 (Allocation Safety)
+- Ready for: Phase 3 (Allocation Safety) + Phase 4 (VTable)
+- Research: Go GC design study for Phase 5
+
+## Key Insights from Go GC Design
+
+**What makes Go's GC successful:**
+1. **Concurrent marking**: Work happens while app runs
+2. **Write barriers**: Maintain invariants during concurrent mutation
+3. **Pacer**: Smart triggering based on heap growth
+4. **Incremental work**: Bounded pause times
+5. **Simplicity**: No generational complexity, predictable behavior
+
+**Direct applicability to our GC:**
+- ✅ Already have tri-color marking
+- ✅ Can implement similar write barriers in GcCell
+- ✅ Pacer logic is straightforward to port
+- ✅ Work budget system fits our architecture
+- ✅ Simpler than Go (no stack scanning needed!)
+
+**Our advantages in Rust:**
+- Type system enforces Trace correctness
+- No runtime stack scanning needed
+- GcPtr provides clear root set
+- Deterministic Drop (not GC-dependent)
+- Can leverage Rust's Send/Sync for safe concurrency
