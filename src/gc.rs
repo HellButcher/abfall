@@ -150,6 +150,37 @@ impl GcContext {
         
         self.collecting.store(false, Ordering::Release);
     }
+    
+    /// Perform an incremental collection with bounded work per step
+    ///
+    /// This allows the GC to perform work in small increments, reducing
+    /// pause times. The `work_per_step` parameter controls how many objects
+    /// are processed in each marking step.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use abfall::GcContext;
+    ///
+    /// let ctx = GcContext::new();
+    /// let ptr = ctx.allocate(100);
+    /// drop(ptr);
+    /// ctx.collect_incremental(10); // Process 10 objects per step
+    /// ```
+    pub fn collect_incremental(&self, work_per_step: usize) {
+        while self.collecting.compare_exchange(
+            false,
+            true,
+            Ordering::Acquire,
+            Ordering::Relaxed,
+        ).is_err() {
+            thread::yield_now();
+        }
+
+        self.heap.collect_incremental(work_per_step);
+        
+        self.collecting.store(false, Ordering::Release);
+    }
 
     /// Force an immediate collection
     ///

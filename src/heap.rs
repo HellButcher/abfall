@@ -7,8 +7,56 @@ use crate::color::{AtomicColor, Color};
 use crate::trace::{Trace, Tracer};
 use std::alloc::Layout;
 use std::ptr::{null_mut, NonNull};
-use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicPtr, AtomicUsize, Ordering};
 use std::sync::Arc;
+
+/// Send-safe wrapper for raw pointer queue
+struct GrayQueue(Vec<*const GcHeader>);
+
+unsafe impl Send for GrayQueue {}
+unsafe impl Sync for GrayQueue {}
+
+impl GrayQueue {
+    fn new() -> Self {
+        Self(Vec::new())
+    }
+    
+    fn push(&mut self, ptr: *const GcHeader) {
+        self.0.push(ptr);
+    }
+    
+    fn pop(&mut self) -> Option<*const GcHeader> {
+        self.0.pop()
+    }
+    
+    fn clear(&mut self) {
+        self.0.clear();
+    }
+    
+    fn append(&mut self, other: &mut Vec<*const GcHeader>) {
+        self.0.append(other);
+    }
+}
+
+/// GC Phase for incremental collection
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GcPhase {
+    Idle = 0,
+    Marking = 1,
+    Sweeping = 2,
+}
+
+impl GcPhase {
+    fn from_u8(value: u8) -> Self {
+        match value {
+            0 => GcPhase::Idle,
+            1 => GcPhase::Marking,
+            2 => GcPhase::Sweeping,
+            _ => GcPhase::Idle,
+        }
+    }
+}
 
 /// Type-erased virtual table for GC operations
 ///
@@ -134,7 +182,8 @@ impl<T: Trace> GcBox<T> {
 /// The garbage collected heap
 ///
 /// Manages allocation and deallocation of GC objects using an intrusive
-/// linked list, and implements the mark and sweep collection algorithm.
+/// linked list, and implements the mark and sweep collection algorithm
+/// with incremental marking support.
 pub struct Heap {
     /// Head of the intrusive linked list of allocations
     head: AtomicPtr<GcHeader>,
@@ -142,6 +191,10 @@ pub struct Heap {
     bytes_allocated: AtomicUsize,
     /// Collection threshold in bytes
     threshold: AtomicUsize,
+    /// Current GC phase (for incremental collection)
+    phase: AtomicU8,
+    /// Gray queue for incremental marking
+    gray_queue: parking_lot::Mutex<GrayQueue>,
 }
 
 impl Heap {
@@ -150,7 +203,19 @@ impl Heap {
             head: AtomicPtr::new(null_mut()),
             bytes_allocated: AtomicUsize::new(0),
             threshold: AtomicUsize::new(1024 * 1024), // 1MB initial threshold
+            phase: AtomicU8::new(GcPhase::Idle as u8),
+            gray_queue: parking_lot::Mutex::new(GrayQueue::new()),
         })
+    }
+    
+    /// Get the current GC phase
+    pub fn phase(&self) -> GcPhase {
+        GcPhase::from_u8(self.phase.load(Ordering::Acquire))
+    }
+    
+    /// Check if a collection should be triggered
+    pub fn should_collect(&self) -> bool {
+        self.bytes_allocated.load(Ordering::Relaxed) >= self.threshold.load(Ordering::Relaxed)
     }
 
     pub fn allocate<T: Trace>(&self, data: T) -> NonNull<GcBox<T>> {
@@ -180,9 +245,71 @@ impl Heap {
         ptr
     }
 
-    pub fn should_collect(&self) -> bool {
-        self.bytes_allocated.load(Ordering::Relaxed) 
-            >= self.threshold.load(Ordering::Relaxed)
+    /// Begin incremental marking phase
+    pub fn begin_mark(&self) {
+        // Transition to Marking phase
+        self.phase.store(GcPhase::Marking as u8, Ordering::Release);
+        
+        // Initialize gray queue with roots
+        let mut gray_queue = self.gray_queue.lock();
+        gray_queue.clear();
+        
+        // Walk the linked list to find roots
+        let mut current = self.head.load(Ordering::Acquire);
+        while !current.is_null() {
+            unsafe {
+                let header = &*current;
+                if header.is_root() {
+                    // Try to transition White -> Gray
+                    if header.color.compare_exchange(
+                        Color::White,
+                        Color::Gray,
+                        Ordering::AcqRel,
+                        Ordering::Acquire
+                    ).is_ok() {
+                        gray_queue.push(current);
+                    }
+                }
+                current = header.next.load(Ordering::Acquire);
+            }
+        }
+    }
+    
+    /// Perform a bounded amount of incremental marking work
+    /// 
+    /// Returns true if marking is complete, false if more work remains
+    pub fn do_mark_work(&self, work_budget: usize) -> bool {
+        let mut gray_queue = self.gray_queue.lock();
+        let mut work_done = 0;
+        
+        while work_done < work_budget {
+            match gray_queue.pop() {
+                Some(ptr) => {
+                    unsafe {
+                        let header = &*ptr;
+                        
+                        // Create a tracer and call the trace function from vtable
+                        let mut tracer = Tracer::new();
+                        (header.vtable.trace)(ptr, &mut tracer);
+                        
+                        // Merge tracer's gray queue
+                        gray_queue.append(tracer.gray_queue_mut());
+                        
+                        // Mark as black
+                        header.color.store(Color::Black, Ordering::Release);
+                        
+                        work_done += 1;
+                    }
+                }
+                None => {
+                    // No more work - marking is complete
+                    return true;
+                }
+            }
+        }
+        
+        // More work remains
+        false
     }
 
     pub fn mark_from_roots(&self) {
@@ -226,12 +353,20 @@ impl Heap {
         }
     }
 
+    /// Begin incremental sweep phase
+    pub fn begin_sweep(&self) {
+        self.phase.store(GcPhase::Sweeping as u8, Ordering::Release);
+    }
+
     pub fn sweep(&self) {
+        // Set sweeping phase
+        self.phase.store(GcPhase::Sweeping as u8, Ordering::Release);
+        
         let mut freed = 0;
-        let mut prev: *mut *mut GcHeader = &self.head as *const AtomicPtr<GcHeader> as *mut *mut GcHeader;
         
         unsafe {
             let mut current = self.head.load(Ordering::Acquire);
+            let mut prev_next: *const AtomicPtr<GcHeader> = &self.head;
             
             while !current.is_null() {
                 let header = &*current;
@@ -239,29 +374,46 @@ impl Heap {
                 
                 // Check if object should be collected (White and not a root)
                 if header.color.load(Ordering::Acquire) == Color::White && !header.is_root() {
-                    // Remove from list
-                    if prev == &self.head as *const AtomicPtr<GcHeader> as *mut *mut GcHeader {
-                        self.head.store(next, Ordering::Release);
-                    } else {
-                        (*(*prev)).next.store(next, Ordering::Release);
-                    }
+                    // Remove from list by updating previous node's next pointer
+                    (*prev_next).store(next, Ordering::Release);
                     
                     // Get size from vtable and call drop function
                     let size = header.vtable.layout.size();
                     (header.vtable.drop)(current);  // Proper Drop via Box::from_raw!
                     freed += size;
                     
+                    // Move to next, keeping same prev
                     current = next;
                 } else {
                     // Reset color for next cycle
                     header.color.store(Color::White, Ordering::Release);
-                    prev = &header.next as *const AtomicPtr<GcHeader> as *mut *mut GcHeader;
+                    
+                    // Move both forward
+                    prev_next = &header.next;
                     current = next;
                 }
             }
         }
 
         self.bytes_allocated.fetch_sub(freed, Ordering::Relaxed);
+        
+        // Transition back to Idle phase
+        self.phase.store(GcPhase::Idle as u8, Ordering::Release);
+    }
+    
+    /// Perform an incremental collection with bounded work per step
+    pub fn collect_incremental(&self, work_per_step: usize) {
+        // Begin marking
+        self.begin_mark();
+        
+        // Do incremental marking work until complete
+        while !self.do_mark_work(work_per_step) {
+            // Small yield to allow allocation to proceed
+            std::hint::spin_loop();
+        }
+        
+        // Sweep (this sets phase and does cleanup)
+        self.sweep();
     }
 
     pub fn bytes_allocated(&self) -> usize {
