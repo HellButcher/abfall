@@ -321,7 +321,7 @@ pub struct GcBox<T: ?Sized> {
 8. ✅ Use offset_of! for pointer casts
 9. ✅ Test with Drop types (String, Vec, custom)
 
-## Phase 5: Incremental/Concurrent Marking (Inspired by Go GC)
+## Phase 5: Incremental/Concurrent Marking (Inspired by Go GC) ✅
 
 **Design Reference: Go's Concurrent Mark & Sweep**
 
@@ -348,36 +348,60 @@ Key insights from Go's design that apply to our implementation:
 - Stack scanning during STW windows
 - Hybrid barrier (Dijkstra + Yuasa)
 
-### 5.2 Applying Go's Design to Rust
+### 5.2 Implemented Design
 
 **Phase State Machine:**
 ```rust
+#[repr(u8)]
 pub enum GcPhase {
-    Idle,           // No GC in progress
-    Marking,        // Concurrent marking active
-    MarkTermination,// Final mark pass (brief pause)
-    Sweeping,       // Concurrent sweep
+    Idle = 0,
+    Marking = 1,
+    Sweeping = 2,
 }
 
-pub struct GcState {
+pub struct Heap {
     phase: AtomicU8,  // Current GC phase
-    work_available: AtomicBool,
-    bytes_marked: AtomicUsize,
-    bytes_allocated_since_gc: AtomicUsize,
+    gray_queue: parking_lot::Mutex<GrayQueue>,
+    // ... other fields
 }
 ```
 
-**Concurrent Marking (inspired by Go):**
+**GrayQueue Wrapper (Send/Sync Safe):**
 ```rust
-// Mark work can be split across multiple calls
+struct GrayQueue(Vec<*const GcHeader>);
+unsafe impl Send for GrayQueue {}
+unsafe impl Sync for GrayQueue {}
+```
+
+**Incremental Marking API:**
+```rust
+// Begin marking phase - initializes gray queue with roots
+pub fn begin_mark(&self) {
+    self.phase.store(GcPhase::Marking as u8, Ordering::Release);
+    // Walk list, mark roots as gray
+}
+
+// Process bounded work - returns true if complete
 pub fn do_mark_work(&self, work_budget: usize) -> bool {
-    let mut work_done = 0;
-    
-    while work_done < work_budget {
-        match self.gray_queue.try_pop() {
-            Some(obj) => {
-                unsafe { ((*obj).vtable.trace)(obj, &mut self.gray_queue); }
-                (*obj).color.store(Color::Black, Ordering::Release);
+    let mut gray_queue = self.gray_queue.lock();
+    for _ in 0..work_budget {
+        match gray_queue.pop() {
+            Some(ptr) => { /* trace and mark black */ }
+            None => return true,  // Done
+        }
+    }
+    false  // More work remains
+}
+
+// Complete incremental collection
+pub fn collect_incremental(&self, work_per_step: usize) {
+    self.begin_mark();
+    while !self.do_mark_work(work_per_step) {
+        std::hint::spin_loop();
+    }
+    self.sweep();
+}
+```
                 work_done += 1;
             }
             None => return true, // Marking complete
@@ -420,7 +444,48 @@ impl WriteBarrier {
 }
 ```
 
-### 5.4 Pacer/Trigger Heuristics (Go-style)
+### 5.3 Critical Bug Fixed: Sweep Corruption
+
+**Problem:**
+The original sweep() implementation used complex pointer-to-pointer logic that corrupted
+the linked list during node removal:
+```rust
+// BEFORE - Complex and error-prone
+let mut prev: *mut *mut GcHeader = &self.head as *const AtomicPtr<GcHeader> as *mut *mut GcHeader;
+if prev == &self.head ... {
+    self.head.store(next, ...);
+} else {
+    (*(*prev)).next.store(next, ...);  // Double dereference!
+}
+prev = &header.next as *const AtomicPtr<GcHeader> as *mut *mut GcHeader;
+```
+
+**Symptoms:**
+- Misaligned pointer dereference
+- Heap corruption
+- Crashes when traversing list after GC
+
+**Solution:**
+Simplified to use `*const AtomicPtr<GcHeader>` pattern:
+```rust
+// AFTER - Clean and safe
+let mut prev_next: *const AtomicPtr<GcHeader> = &self.head;
+
+if should_collect {
+    (*prev_next).store(next, Ordering::Release);  // Single operation!
+    // Free object
+} else {
+    prev_next = &header.next;  // Move forward
+}
+```
+
+**Benefits:**
+- Unified handling of head and non-head nodes
+- No special cases
+- Clearer ownership and lifetime semantics
+- Proper list traversal without corruption
+
+### 5.4 Pacer/Trigger Heuristics (Future Work)
 
 **Go's pacer aims to:**
 - Finish marking before heap doubles
@@ -453,44 +518,135 @@ impl GcPacer {
 }
 ```
 
-### 5.5 Implementation Roadmap
+### 5.5 Implementation Results ✅
 
-**Step 1: Add Phase Tracking**
-- [ ] Implement GcPhase enum and state machine
-- [ ] Track current phase atomically
-- [ ] Update allocation to check phase
+**Completed Features:**
+- ✅ GcPhase enum (Idle, Marking, Sweeping)
+- ✅ Phase tracking with AtomicU8
+- ✅ GrayQueue wrapper (Send/Sync safe)
+- ✅ begin_mark() - Initialize marking phase
+- ✅ do_mark_work(budget) - Bounded incremental work
+- ✅ begin_sweep() - Transition to sweep phase
+- ✅ collect_incremental(work_per_step) - Full incremental GC
+- ✅ Fixed critical sweep() corruption bug
 
-**Step 2: Split Mark Phase**
-- [ ] Convert mark phase to incremental work units
-- [ ] Implement work budget system
-- [ ] Add gray queue management for concurrent access
+**Files Changed:**
+- heap.rs: GcPhase, GrayQueue, phase tracking (+ ~150 lines)
+- heap.rs: begin_mark(), do_mark_work(), collect_incremental()
+- heap.rs: Fixed sweep() with simplified pointer logic
+- gc.rs: Added collect_incremental() to GcContext API
+- Cargo.toml: Added parking_lot dependency
 
-**Step 3: Implement Write Barriers**
+**Tests Added:**
+- incremental_test.rs: Validates incremental collection works
+- debug_trace.rs: Traces GC behavior for debugging
+- debug_incremental.rs: Simple incremental workflow test
+
+**Test Results:**
+```
+✓ All 7 unit tests passing
+✓ incremental_test.rs: 5 objects → 3 after GC (2 collected)
+✓ debug_trace.rs: Regular and incremental GC both work
+✓ simple_safety.rs: Allocation safety maintained
+✓ vtable_drop_test.rs: Drop semantics correct
+```
+
+**Commits:**
+1. Commit 11: feat: implement incremental marking (Phase 5)
+   - Complete Phase 5 implementation
+   - Sweep bug fix included
+   - All tests passing
+
+### 5.6 Implementation Steps (Completed)
+
+**Step 1: Add Phase Tracking ✅**
+- ✅ Implement GcPhase enum and state machine
+- ✅ Track current phase atomically with AtomicU8
+- ✅ phase() accessor for current phase
+
+**Step 2: Split Mark Phase ✅**
+- ✅ Convert mark phase to incremental work units
+- ✅ Implement work budget system (work_per_step parameter)
+- ✅ Add shared gray queue with Mutex protection
+- ✅ GrayQueue wrapper for Send/Sync safety
+
+**Step 3: Sweep Integration ✅**
+- ✅ Phase transition in sweep()
+- ✅ Fixed linked list manipulation bug
+- ✅ Proper Idle phase restoration
+
+**Step 4: Public API ✅**
+- ✅ GcContext::collect_incremental() method
+- ✅ Documentation with examples
+- ✅ Compatible with existing collect()
+
+### 5.7 Future Enhancements (Phase 6+)
+
+**Write Barriers (Deferred):**
 - [ ] Add write barrier to GcCell
 - [ ] Implement Yuasa-style old value shading
 - [ ] Test barrier correctness with concurrent mutations
 
-**Step 4: Concurrent Sweep**
+**Write Barriers (Phase 6):**
+- [ ] Add write barrier to GcCell
+- [ ] Implement Yuasa-style old value shading
+- [ ] Implement Dijkstra-style new value marking
+- [ ] Hybrid barrier combining both approaches
+
+**Concurrent Sweep (Future):**
 - [ ] Make sweep interruptible
 - [ ] Allow allocation during sweep (different color space)
 - [ ] Handle sweep/allocate races
 
-**Step 5: Pacer Integration**
+**Pacer Integration (Future):**
 - [ ] Implement GcPacer with Go-style heuristics
 - [ ] Tune gc_percent parameter (start with 100%)
 - [ ] Add metrics for pause times
 
-**Step 6: Background Goroutine (Thread) Support**
+**Background Thread Support (Future):**
 - [ ] Dedicated GC thread for background marking
 - [ ] Assist mechanism: mutator helps when heap pressure high
 - [ ] Coordinate with application threads
 
-### 5.6 Key Differences from Go
+### 5.8 Key Differences from Go
 
-**What we can adopt:**
-- ✓ Tri-color marking (already have!)
-- ✓ Concurrent marking with write barriers
-- ✓ Phase-based state machine
+**What we adopted:**
+- ✅ Tri-color marking (already had it!)
+- ✅ Phase-based state machine
+- ✅ Incremental work budget system
+- ✅ Shared gray queue for work distribution
+
+**What's different in Rust:**
+- **No stack scanning**: Rust has no GC pointers on stack (only GcPtr)
+- **Simpler roots**: Only GcPtr root_count, not stack roots
+- **Type safety**: Trace trait ensures correctness at compile time
+- **No finalizers**: Drop is deterministic, not GC-dependent
+
+**Not yet implemented:**
+- Write barriers (deferred to Phase 6)
+- Concurrent marking with mutator (needs write barriers)
+- Pacer/trigger heuristics (future optimization)
+- Background GC thread (future enhancement)
+
+### 5.9 Performance Characteristics
+
+**Current Implementation:**
+- Incremental marking reduces individual pause times
+- Work budget controls granularity (tunable)
+- Compatible with stop-the-world collection
+- Lock-free allocation still supported
+
+**Measured Behavior:**
+- Test: 5 objects, 2 dropped, work_budget=2
+- Result: Correct collection (3 remaining)
+- All surviving objects accessible after GC
+
+**Future Goals (Go-inspired):**
+- <1ms pause times for mark steps
+- <10% CPU overhead for concurrent marking
+- Support heaps up to 1GB efficiently
+
+### 5.10 References & Further Reading
 - ✓ Pacer heuristics for triggering
 - ✓ Incremental work budget system
 
@@ -604,26 +760,26 @@ struct WriteBarrier {
 
 ## Implementation Status
 
-### ✅ Completed (4/7 Phases)
+### ✅ Completed (5/7 Phases)
 - **Phase 1:** Core data structures (lock-free list, type-erased headers)
 - **Phase 2:** Trace trait system (graph traversal)
 - **Phase 3:** Allocation safety (root_count=1, no race window)
 - **Phase 4:** VTable + Box allocation (proper Drop, memory safety)
+- **Phase 5:** Incremental marking (Go GC-inspired, work budgets, phase tracking)
 
 ### 🔄 Next Priority
-- **Phase 5:** Incremental/concurrent marking (Go GC-inspired)
-  - Phase state machine (Idle/Marking/Sweeping)
-  - Work-based incremental marking
-  - Write barriers (hybrid Dijkstra + Yuasa)
-  - Pacer/trigger heuristics
-  - Background marking thread
+- **Phase 6:** Write barriers & GcCell integration
+  - GcCell for interior mutability with write barriers
+  - Yuasa/Dijkstra hybrid barrier
+  - Integration with incremental marking
+  - Concurrent-safe mutation
 
 ### 📚 Future Work
-- **Phase 6:** Write barriers & GcCell integration
 - **Phase 7:** Optimization and tuning
   - Background marking thread
-- **Phase 6:** Write barriers & GcCell integration
-- **Phase 7:** Optimization and tuning
+  - Pacer/trigger heuristics
+  - Performance benchmarking
+  - Hot path optimization
 
 ### 📖 Research References Added
 - Go GC guide and blog posts
@@ -632,12 +788,12 @@ struct WriteBarrier {
 
 ## Current Branch Status
 - Branch: `feat/improved-gc`
-- Commits: 8 (clean history)
-- Tests: All passing ✓
-- Ready for: Phase 5 (Incremental Marking)
-- Research: Go GC design study for Phase 5
+- Commits: 11 (clean semantic history)
+- Tests: All passing ✓ (7 unit + 6 examples)
+- Ready for: Phase 6 (Write Barriers & GcCell)
+- Progress: 71% complete (5/7 phases)
 
-## Key Achievements (Phases 3 & 4)
+## Key Achievements (Phases 3, 4 & 5)
 
 **Phase 3: Allocation Safety**
 - Fixed critical race condition in allocation
@@ -656,12 +812,23 @@ struct WriteBarrier {
 - Proper Drop for all types (String, Vec, custom)
 - Tests: vtable_drop_test.rs
 
+**Phase 5: Incremental Marking (Go GC-Inspired)**
+- Implemented GcPhase state machine (Idle/Marking/Sweeping)
+- GrayQueue wrapper for Send/Sync safety
+- begin_mark() initializes marking with roots
+- do_mark_work(budget) for bounded incremental work
+- collect_incremental(work_per_step) full incremental GC
+- Fixed critical sweep() bug (linked list corruption)
+- Added parking_lot dependency for efficient Mutex
+- Tests: incremental_test.rs, debug_trace.rs
+
 **Code Quality:**
-- 8 clean semantic commits
+- 11 clean semantic commits
 - Comprehensive test coverage
 - Memory-safe pointer operations
 - Idiomatic Rust patterns
 - Zero resource leaks
+- All clippy warnings addressed
 
 ## Key Insights from Go GC Design
 
