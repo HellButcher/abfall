@@ -20,14 +20,6 @@ impl Tracer {
         }
     }
 
-    pub(crate) fn with_queue(gray_queue: Vec<*const GcHeader>) -> Self {
-        Self { gray_queue }
-    }
-
-    pub(crate) fn into_queue(self) -> Vec<*const GcHeader> {
-        self.gray_queue
-    }
-
     pub(crate) fn gray_queue_mut(&mut self) -> &mut Vec<*const GcHeader> {
         &mut self.gray_queue
     }

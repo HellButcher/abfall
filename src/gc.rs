@@ -5,7 +5,7 @@
 
 use crate::heap::Heap;
 use crate::ptr::GcPtr;
-use crate::trace::{Trace, Tracer};
+use crate::trace::Trace;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
@@ -76,17 +76,16 @@ impl GcContext {
                 loop {
                     thread::sleep(interval);
                     
-                    if heap_clone.should_collect() {
-                        if let Ok(_) = collecting_clone.compare_exchange(
+                    if heap_clone.should_collect()
+                        && collecting_clone.compare_exchange(
                             false,
                             true,
                             Ordering::Acquire,
                             Ordering::Relaxed,
-                        ) {
-                            heap_clone.mark_from_roots();
-                            heap_clone.sweep();
-                            collecting_clone.store(false, Ordering::Release);
-                        }
+                        ).is_ok() {
+                        heap_clone.mark_from_roots();
+                        heap_clone.sweep();
+                        collecting_clone.store(false, Ordering::Release);
                     }
                 }
             }))

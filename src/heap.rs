@@ -218,7 +218,7 @@ impl Heap {
                 (header.vtable.trace)(ptr, &mut tracer);
                 
                 // Merge tracer's gray queue
-                gray_queue.extend(tracer.gray_queue_mut().drain(..));
+                gray_queue.append(tracer.gray_queue_mut());
                 
                 // Mark as black
                 header.color.store(Color::Black, Ordering::Release);
