@@ -115,7 +115,12 @@ impl GcContext {
     /// let text = ctx.allocate("Hello");
     /// ```
     pub fn allocate<T>(self: &Arc<Self>, data: T) -> GcPtr<T> {
-        let ptr = self.heap.allocate(data);
+        // Default trace function for types without Trace implementation
+        unsafe fn no_trace<T>(_ptr: *const crate::heap::GcHeader, _gray_queue: &mut Vec<*const crate::heap::GcHeader>) {
+            // No tracing needed for types without GC pointers
+        }
+        
+        let ptr = self.heap.allocate(data, no_trace::<T>);
         GcPtr::new(ptr, Arc::clone(&self.heap))
     }
 

@@ -5,22 +5,59 @@
 
 use crate::color::{AtomicColor, Color};
 use std::alloc::{alloc, dealloc, Layout};
-use std::ptr::NonNull;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::ptr::{null_mut, NonNull};
+use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
+use std::sync::Arc;
+
+/// Type-erased header for all GC objects
+///
+/// This header is shared by all `GcBox<T>` instances and allows
+/// uniform handling of objects in the allocation list.
+pub struct GcHeader {
+    /// Current color in the tri-color marking algorithm
+    pub color: AtomicColor,
+    /// Reference count for root pointers (0 = not a root)
+    pub root_count: AtomicUsize,
+    /// Next pointer in the intrusive linked list
+    pub next: AtomicPtr<GcHeader>,
+    /// Type-erased trace function
+    pub trace_fn: unsafe fn(*const GcHeader, &mut Vec<*const GcHeader>),
+}
+
+impl GcHeader {
+    pub fn new<T>(trace_fn: unsafe fn(*const GcHeader, &mut Vec<*const GcHeader>)) -> Self {
+        Self {
+            color: AtomicColor::new(Color::White),
+            root_count: AtomicUsize::new(0),  // Start at 0, GcPtr::new will increment
+            next: AtomicPtr::new(null_mut()),
+            trace_fn,
+        }
+    }
+
+    pub fn inc_root(&self) {
+        self.root_count.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn dec_root(&self) {
+        self.root_count.fetch_sub(1, Ordering::Relaxed);
+    }
+
+    pub fn is_root(&self) -> bool {
+        self.root_count.load(Ordering::Relaxed) > 0
+    }
+}
 
 /// A garbage collected object with metadata
 ///
-/// `GcBox` wraps a value with GC metadata including color, mark bit, and root status.
+/// `GcBox` wraps a value with GC metadata including color and root status.
 pub struct GcBox<T: ?Sized> {
-    color: AtomicColor,
-    marked: AtomicBool,
-    root: AtomicBool,
-    data: T,
+    pub header: GcHeader,
+    pub data: T,
 }
 
 impl<T> GcBox<T> {
-    pub fn new(data: T) -> NonNull<GcBox<T>> {
+    pub fn new(data: T, trace_fn: unsafe fn(*const GcHeader, &mut Vec<*const GcHeader>)) -> NonNull<GcBox<T>> {
+        // TODO: use Box::into_raw for allocation
         let layout = Layout::new::<GcBox<T>>();
         unsafe {
             let ptr = alloc(layout) as *mut GcBox<T>;
@@ -28,9 +65,7 @@ impl<T> GcBox<T> {
                 panic!("Allocation failed");
             }
             ptr.write(GcBox {
-                color: AtomicColor::new(Color::White),
-                marked: AtomicBool::new(false),
-                root: AtomicBool::new(true),
+                header: GcHeader::new::<T>(trace_fn),
                 data,
             });
             NonNull::new_unchecked(ptr)
@@ -40,63 +75,54 @@ impl<T> GcBox<T> {
     pub fn data(&self) -> &T {
         &self.data
     }
-
-    #[allow(dead_code)]
-    pub fn color(&self) -> Color {
-        self.color.load(Ordering::Acquire)
-    }
-
-    pub fn set_color(&self, color: Color) {
-        self.color.store(color, Ordering::Release);
-    }
-
-    pub fn is_marked(&self) -> bool {
-        self.marked.load(Ordering::Acquire)
-    }
-
-    pub fn mark(&self) {
-        self.marked.store(true, Ordering::Release);
-    }
-
-    pub fn unmark(&self) {
-        self.marked.store(false, Ordering::Release);
-    }
-
-    pub fn is_root(&self) -> bool {
-        self.root.load(Ordering::Acquire)
-    }
-
-    pub fn set_root(&self, is_root: bool) {
-        self.root.store(is_root, Ordering::Release);
-    }
 }
 
 /// The garbage collected heap
 ///
-/// Manages allocation and deallocation of GC objects, and implements
-/// the mark and sweep collection algorithm.
+/// Manages allocation and deallocation of GC objects using an intrusive
+/// linked list, and implements the mark and sweep collection algorithm.
 pub struct Heap {
-    allocations: Mutex<Vec<usize>>,
+    /// Head of the intrusive linked list of allocations
+    head: AtomicPtr<GcHeader>,
+    /// Total bytes currently allocated
     bytes_allocated: AtomicUsize,
+    /// Collection threshold in bytes
     threshold: AtomicUsize,
 }
 
 impl Heap {
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
-            allocations: Mutex::new(Vec::new()),
+            head: AtomicPtr::new(null_mut()),
             bytes_allocated: AtomicUsize::new(0),
             threshold: AtomicUsize::new(1024 * 1024), // 1MB initial threshold
         })
     }
 
-    pub fn allocate<T>(&self, data: T) -> NonNull<GcBox<T>> {
-        let ptr = GcBox::new(data);
+    pub fn allocate<T>(&self, data: T, trace_fn: unsafe fn(*const GcHeader, &mut Vec<*const GcHeader>)) -> NonNull<GcBox<T>> {
+        let ptr = GcBox::new(data, trace_fn);
         let size = std::mem::size_of::<GcBox<T>>();
         
-        self.allocations.lock().unwrap().push(ptr.as_ptr() as usize);
-        self.bytes_allocated.fetch_add(size, Ordering::Relaxed);
+        // Insert at head of linked list atomically
+        let header_ptr = unsafe { &(*ptr.as_ptr()).header as *const GcHeader as *mut GcHeader };
         
+        loop {
+            let current_head = self.head.load(Ordering::Acquire);
+            unsafe {
+                (*header_ptr).next.store(current_head, Ordering::Relaxed);
+            }
+            
+            if self.head.compare_exchange(
+                current_head,
+                header_ptr,
+                Ordering::Release,
+                Ordering::Acquire,
+            ).is_ok() {
+                break;
+            }
+        }
+        
+        self.bytes_allocated.fetch_add(size, Ordering::Relaxed);
         ptr
     }
 
@@ -105,26 +131,74 @@ impl Heap {
             >= self.threshold.load(Ordering::Relaxed)
     }
 
-    pub fn sweep(&self) {
-        let mut allocations = self.allocations.lock().unwrap();
-        let mut i = 0;
-        let mut freed = 0;
+    pub fn mark_from_roots(&self) {
+        let mut gray_queue: Vec<*const GcHeader> = Vec::new();
 
-        while i < allocations.len() {
-            let addr = allocations[i];
+        // Walk the linked list to find roots
+        let mut current = self.head.load(Ordering::Acquire);
+        while !current.is_null() {
             unsafe {
-                let ptr = addr as *mut GcBox<u8>;
-                let gc_box = &*ptr;
+                let header = &*current;
+                if header.is_root() {
+                    // Try to transition White -> Gray
+                    if header.color.compare_exchange(
+                        Color::White,
+                        Color::Gray,
+                        Ordering::AcqRel,
+                        Ordering::Acquire
+                    ).is_ok() {
+                        gray_queue.push(current);
+                    }
+                }
+                current = header.next.load(Ordering::Acquire);
+            }
+        }
+
+        // Process gray queue
+        while let Some(ptr) = gray_queue.pop() {
+            unsafe {
+                let header = &*ptr;
                 
-                if !gc_box.is_marked() && !gc_box.is_root() {
-                    let layout = Layout::for_value(gc_box);
+                // Call the trace function to find children
+                (header.trace_fn)(ptr, &mut gray_queue);
+                
+                // Mark as black
+                header.color.store(Color::Black, Ordering::Release);
+            }
+        }
+    }
+
+    pub fn sweep(&self) {
+        let mut freed = 0;
+        let mut prev: *mut *mut GcHeader = &self.head as *const AtomicPtr<GcHeader> as *mut *mut GcHeader;
+        
+        unsafe {
+            let mut current = self.head.load(Ordering::Acquire);
+            
+            while !current.is_null() {
+                let header = &*current;
+                let next = header.next.load(Ordering::Acquire);
+                
+                // Check if object should be collected (White and not a root)
+                if header.color.load(Ordering::Acquire) == Color::White && !header.is_root() {
+                    // Remove from list
+                    if prev == &self.head as *const AtomicPtr<GcHeader> as *mut *mut GcHeader {
+                        self.head.store(next, Ordering::Release);
+                    } else {
+                        (*(*prev)).next.store(next, Ordering::Release);
+                    }
+                    
+                    // Calculate layout and free
+                    let layout = Layout::for_value(&*current);
                     freed += layout.size();
-                    dealloc(ptr as *mut u8, layout);
-                    allocations.swap_remove(i);
+                    dealloc(current as *mut u8, layout);
+                    
+                    current = next;
                 } else {
-                    gc_box.unmark();
-                    gc_box.set_color(Color::White);
-                    i += 1;
+                    // Reset color for next cycle
+                    header.color.store(Color::White, Ordering::Release);
+                    prev = &header.next as *const AtomicPtr<GcHeader> as *mut *mut GcHeader;
+                    current = next;
                 }
             }
         }
@@ -132,49 +206,36 @@ impl Heap {
         self.bytes_allocated.fetch_sub(freed, Ordering::Relaxed);
     }
 
-    pub fn mark_from_roots(&self) {
-        let allocations = self.allocations.lock().unwrap();
-        let mut gray_queue: Vec<usize> = Vec::new();
-
-        for &addr in allocations.iter() {
-            unsafe {
-                let ptr = addr as *mut GcBox<u8>;
-                let gc_box = &*ptr;
-                if gc_box.is_root() {
-                    gc_box.set_color(Color::Gray);
-                    gray_queue.push(addr);
-                }
-            }
-        }
-
-        while let Some(addr) = gray_queue.pop() {
-            unsafe {
-                let ptr = addr as *mut GcBox<u8>;
-                let gc_box = &*ptr;
-                gc_box.mark();
-                gc_box.set_color(Color::Black);
-            }
-        }
-    }
-
     pub fn bytes_allocated(&self) -> usize {
         self.bytes_allocated.load(Ordering::Relaxed)
     }
 
     pub fn allocation_count(&self) -> usize {
-        self.allocations.lock().unwrap().len()
+        let mut count = 0;
+        let mut current = self.head.load(Ordering::Acquire);
+        
+        while !current.is_null() {
+            count += 1;
+            unsafe {
+                current = (*current).next.load(Ordering::Acquire);
+            }
+        }
+        
+        count
     }
 }
 
 impl Drop for Heap {
     fn drop(&mut self) {
-        let allocations = self.allocations.lock().unwrap();
-        for &addr in allocations.iter() {
+        let mut current = self.head.load(Ordering::Acquire);
+        
+        while !current.is_null() {
             unsafe {
-                let ptr = addr as *mut GcBox<u8>;
-                let gc_box = &*ptr;
-                let layout = Layout::for_value(gc_box);
-                dealloc(ptr as *mut u8, layout);
+                let header = &*current;
+                let next = header.next.load(Ordering::Acquire);
+                let layout = Layout::for_value(&*current);
+                dealloc(current as *mut u8, layout);
+                current = next;
             }
         }
     }
