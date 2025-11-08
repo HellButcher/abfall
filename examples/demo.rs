@@ -1,6 +1,12 @@
+//! Basic demo of the Abfall garbage collector
+//!
+//! This example demonstrates:
+//! - Basic allocation of GC objects
+//! - Manual garbage collection
+//! - How GC roots keep objects alive
+//! - Memory pressure and collection behavior
+
 use abfall::GcContext;
-use std::thread;
-use std::time::Duration;
 
 fn main() {
     println!("=== Abfall Garbage Collector Demo ===\n");
@@ -15,13 +21,8 @@ fn main() {
     manual_collection();
     println!();
 
-    // Example 3: Concurrent allocation
-    println!("Example 3: Concurrent Allocation");
-    concurrent_allocation();
-    println!();
-
-    // Example 4: Memory pressure
-    println!("Example 4: Memory Pressure and Collection");
+    // Example 3: Memory pressure
+    println!("Example 3: Memory Pressure and Collection");
     memory_pressure();
     println!();
 }
@@ -70,27 +71,6 @@ fn manual_collection() {
     println!("  ptr1 still alive: {}", *ptr1);
 }
 
-fn concurrent_allocation() {
-    println!("  Spawning 8 threads, each with their own GC context...");
-    let mut handles = vec![];
-
-    for i in 0..8 {
-        let handle = thread::spawn(move || {
-            let ctx = GcContext::new();
-            let value = ctx.allocate(i * 100);
-            thread::sleep(Duration::from_millis(10));
-            println!("  Thread {} allocated: {}", i, *value);
-        });
-        handles.push(handle);
-    }
-
-    for handle in handles {
-        handle.join().unwrap();
-    }
-
-    println!("  Each thread had its own GC heap");
-}
-
 fn memory_pressure() {
     let ctx = GcContext::new();
 
@@ -105,15 +85,19 @@ fn memory_pressure() {
         }
     }
 
-    println!("  Before collection: {} allocations, {} bytes",
-             ctx.heap().allocation_count(),
-             ctx.heap().bytes_allocated());
+    println!(
+        "  Before collection: {} allocations, {} bytes",
+        ctx.heap().allocation_count(),
+        ctx.heap().bytes_allocated()
+    );
 
     // Force collection
     ctx.collect();
 
-    println!("  After collection: {} allocations, {} bytes",
-             ctx.heap().allocation_count(),
-             ctx.heap().bytes_allocated());
+    println!(
+        "  After collection: {} allocations, {} bytes",
+        ctx.heap().allocation_count(),
+        ctx.heap().bytes_allocated()
+    );
     println!("  Live objects kept: {}", live_objects.len());
 }
