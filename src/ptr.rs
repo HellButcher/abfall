@@ -23,9 +23,8 @@ pub struct GcPtr<T> {
 
 impl<T> GcPtr<T> {
     pub(crate) fn new(ptr: NonNull<GcBox<T>>, heap: Arc<Heap>) -> Self {
-        unsafe {
-            ptr.as_ref().header.inc_root();
-        }
+        // Don't increment root_count - already initialized to 1 in GcHeader::new
+        // This prevents a race window where root_count could be 0
         Self { ptr, heap }
     }
 

@@ -28,7 +28,7 @@ impl GcHeader {
     pub fn new<T>(trace_fn: unsafe fn(*const GcHeader, &mut Vec<*const GcHeader>)) -> Self {
         Self {
             color: AtomicColor::new(Color::White),
-            root_count: AtomicUsize::new(0),  // Start at 0, GcPtr::new will increment
+            root_count: AtomicUsize::new(1),  // Start at 1 - already rooted! (allocation safety)
             next: AtomicPtr::new(null_mut()),
             trace_fn,
         }
