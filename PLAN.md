@@ -1,8 +1,8 @@
 # GC Improvement Plan - Concurrent Tri-Color Mark & Sweep
 
-## Status: 5/7 Phases Complete (71%)
+## Status: 6/7 Phases Complete (86%)
 
-**Branch**: `feat/improved-gc` | **Commits**: 12 | **Tests**: ✓ All passing
+**Branch**: `feat/improved-gc` | **Commits**: 13 | **Tests**: ✓ All passing
 
 ### Completed ✅
 1. Lock-free intrusive list + type-erased headers
@@ -10,10 +10,10 @@
 3. Allocation safety (root_count=1, no race)
 4. VTable + Box allocation (proper Drop)
 5. Incremental marking (Go GC-inspired)
+6. Write barriers & GcCell
 
 ### In Progress 🔄
-6. Write barriers & GcCell (next)
-7. Optimization & tuning
+7. Optimization & tuning (future)
 
 ---
 
@@ -114,39 +114,67 @@ pub fn collect_incremental(&self, work_per_step: usize)
 
 ---
 
-### Phase 6: Write Barriers & GcCell 🔄 NEXT
+### Phase 6: Write Barriers & GcCell ✅ COMPLETE
 
-**Goal**: Enable concurrent mutation during marking
+**Problem Solved**: Tri-color invariant violations during concurrent mutation
 
-**Design** (Go-inspired):
+**Solution**: Three specialized cell types with appropriate write barriers
+
+**Implementation**:
 ```rust
-pub struct GcCell<T> {
-    value: UnsafeCell<T>,
+// 1. GcCell<T: Copy> - Simple cell for Copy types (no barrier needed)
+pub struct GcCell<T: Copy> {
+    value: Cell<T>,
 }
 
-impl<T: Trace> GcCell<T> {
-    pub fn set(&self, value: T) {
-        // Write barrier: shade old value if marking
-        if gc_phase() == Marking {
-            // Yuasa: mark old value gray
-            mark_gray(old_value);
+// 2. GcPtrCell<T> - Dijkstra write barrier for GcPtr updates
+pub struct GcPtrCell<T> {
+    value: UnsafeCell<GcPtr<T>>,
+    heap: Arc<Heap>,
+}
+impl<T> GcPtrCell<T> {
+    pub fn set(&self, new: GcPtr<T>) {
+        if self.heap.is_marking() {
+            self.heap.mark_gray(new.header_ptr()); // Dijkstra barrier
         }
-        // Store new value
-        unsafe { *self.value.get() = value; }
+        unsafe { *self.value.get() = new; }
+    }
+}
+
+// 3. GcRefCell<T: Trace> - Yuasa write barrier with RefCell semantics
+pub struct GcRefCell<T> {
+    value: UnsafeCell<T>,
+    borrow: Cell<BorrowState>,
+    heap: Arc<Heap>,
+}
+impl<T: Trace> Drop for GcRefMut<'_, T> {
+    fn drop(&mut self) {
+        if self.cell.heap.is_marking() {
+            // Yuasa barrier: trace modified value
+            unsafe { (*self.cell.value.get()).trace(&mut tracer); }
+        }
     }
 }
 ```
 
-**Hybrid Barrier** (Dijkstra + Yuasa):
-- Yuasa: Snapshot-at-beginning (shade old values)
-- Dijkstra: Mark new values if black → white edge
-- Go uses hybrid for concurrent safety
+**Key Features**:
+- **GcCell**: Zero-overhead for Copy types (no GC pointers possible)
+- **GcPtrCell**: Dijkstra barrier shades new pointer gray
+- **GcRefCell**: Yuasa barrier traces value after mutation
+- **Heap API**: `is_marking()`, `mark_gray()` for write barriers
 
-**Tasks**:
-- [ ] Implement GcCell with write barrier
-- [ ] Integrate with incremental marking
-- [ ] Test concurrent mutation correctness
-- [ ] Update Trace implementations
+**Why It Works**:
+- **Dijkstra (GcPtrCell)**: Prevents black→white edges by shading new targets
+- **Yuasa (GcRefCell)**: Snapshot-at-beginning by tracing after mutation
+- **Copy types safe**: Can't contain GC pointers, no barrier needed
+
+**Tests**:
+- ✅ GcCell basic operations
+- ✅ GcPtrCell write barrier during marking
+- ✅ GcRefCell borrow checking
+- ✅ Example: mutation during incremental GC
+
+**Commit**: #13 (feat: implement write barriers with tri-color cells)
 
 ---
 

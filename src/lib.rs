@@ -34,10 +34,12 @@ mod color;
 mod heap;
 mod ptr;
 mod trace;
+mod cell;
 
 pub use gc::{Gc, GcContext};
 pub use ptr::GcPtr;
 pub use trace::{Trace, NoTrace, Tracer};
+pub use cell::{GcPtrCell, GcRefCell, GcRef, GcRefMut};
 
 #[cfg(test)]
 mod tests {

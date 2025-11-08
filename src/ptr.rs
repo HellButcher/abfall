@@ -74,3 +74,10 @@ impl<T> Drop for GcPtr<T> {
 
 unsafe impl<T: Send> Send for GcPtr<T> {}
 unsafe impl<T: Sync> Sync for GcPtr<T> {}
+
+// GcPtr implements Trace - it marks itself as reachable
+unsafe impl<T> crate::trace::Trace for GcPtr<T> {
+    fn trace(&self, tracer: &mut crate::trace::Tracer) {
+        tracer.mark(self);
+    }
+}

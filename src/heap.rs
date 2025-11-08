@@ -48,6 +48,7 @@ pub enum GcPhase {
 }
 
 impl GcPhase {
+    #[allow(dead_code)]
     fn from_u8(value: u8) -> Self {
         match value {
             0 => GcPhase::Idle,
@@ -209,8 +210,39 @@ impl Heap {
     }
     
     /// Get the current GC phase
+    #[allow(dead_code)]
     pub fn phase(&self) -> GcPhase {
         GcPhase::from_u8(self.phase.load(Ordering::Acquire))
+    }
+    
+    /// Check if currently in marking phase (for write barriers)
+    pub fn is_marking(&self) -> bool {
+        self.phase.load(Ordering::Acquire) == GcPhase::Marking as u8
+    }
+    
+    /// Mark an object as gray (write barrier support)
+    /// 
+    /// Used by write barriers to shade objects that are being written during marking.
+    /// If the object is white, transitions it to gray and adds to the gray queue.
+    pub fn mark_gray(&self, header: *const GcHeader) {
+        if header.is_null() {
+            return;
+        }
+        
+        unsafe {
+            let h = &*header;
+            // Try to transition White -> Gray
+            if h.color.compare_exchange(
+                Color::White,
+                Color::Gray,
+                Ordering::AcqRel,
+                Ordering::Acquire
+            ).is_ok() {
+                // Successfully transitioned - add to gray queue
+                self.gray_queue.lock().push(header);
+            }
+            // If already gray or black, nothing to do
+        }
     }
     
     /// Check if a collection should be triggered
@@ -354,6 +386,7 @@ impl Heap {
     }
 
     /// Begin incremental sweep phase
+    #[allow(dead_code)]
     pub fn begin_sweep(&self) {
         self.phase.store(GcPhase::Sweeping as u8, Ordering::Release);
     }

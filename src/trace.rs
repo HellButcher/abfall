@@ -4,18 +4,32 @@
 //! in garbage collection. The trait allows the GC to traverse object graphs and
 //! mark reachable objects.
 
-use crate::heap::GcHeader;
+use crate::heap::{GcHeader, Heap};
+use std::sync::{Arc, Weak};
 
 /// A tracer for marking reachable objects
 ///
 /// Used during the mark phase to traverse the object graph
 pub struct Tracer {
+    #[allow(dead_code)]
+    heap: Option<Weak<Heap>>,
     gray_queue: Vec<*const GcHeader>,
 }
 
 impl Tracer {
+    /// Create a new tracer without heap reference (for internal GC use)
     pub(crate) fn new() -> Self {
         Self {
+            heap: None,
+            gray_queue: Vec::new(),
+        }
+    }
+    
+    /// Create a new tracer with heap reference (for write barriers)
+    #[allow(dead_code)]
+    pub(crate) fn with_heap(heap: Arc<Heap>) -> Self {
+        Self {
+            heap: Some(Arc::downgrade(&heap)),
             gray_queue: Vec::new(),
         }
     }
@@ -23,11 +37,16 @@ impl Tracer {
     pub(crate) fn gray_queue_mut(&mut self) -> &mut Vec<*const GcHeader> {
         &mut self.gray_queue
     }
+    
+    #[allow(dead_code)]
+    pub(crate) fn heap(&self) -> Option<Arc<Heap>> {
+        self.heap.as_ref().and_then(|w| w.upgrade())
+    }
 
     /// Mark an object as reachable
     ///
     /// Adds the object to the gray queue for processing if it's currently white
-    pub fn mark<T: Trace>(&mut self, ptr: &crate::GcPtr<T>) {
+    pub fn mark<T>(&mut self, ptr: &crate::GcPtr<T>) {
         use crate::color::Color;
         
         let header_ptr = ptr.header_ptr();
@@ -121,8 +140,14 @@ unsafe impl NoTrace for &str {}
 // Vec is NoTrace if its element type is NoTrace
 unsafe impl<T: NoTrace> NoTrace for Vec<T> {}
 
-// Option is NoTrace if T is NoTrace
-unsafe impl<T: NoTrace> NoTrace for Option<T> {}
+// Option<T> implements Trace for any T: Trace
+unsafe impl<T: Trace> Trace for Option<T> {
+    fn trace(&self, tracer: &mut Tracer) {
+        if let Some(value) = self {
+            value.trace(tracer);
+        }
+    }
+}
 
 // Result is NoTrace if both types are NoTrace  
 unsafe impl<T: NoTrace, E: NoTrace> NoTrace for Result<T, E> {}

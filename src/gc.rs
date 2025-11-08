@@ -22,11 +22,10 @@ use std::time::Duration;
 /// Multiple threads can allocate objects concurrently.
 ///
 /// # Collection Strategy
-///
 /// - Automatic: Background thread performs collection when heap exceeds threshold
 /// - Manual: Caller explicitly triggers collection via `collect()`
 pub struct GcContext {
-    heap: Arc<Heap>,
+    pub(crate) heap: Arc<Heap>,
     collecting: Arc<AtomicBool>,
     background_thread: Option<thread::JoinHandle<()>>,
 }
@@ -202,6 +201,11 @@ impl GcContext {
     /// Check if a collection is currently in progress
     pub fn is_collecting(&self) -> bool {
         self.collecting.load(Ordering::Relaxed)
+    }
+    
+    /// Get a reference to the underlying heap (for cell types)
+    pub fn heap(&self) -> &Arc<Heap> {
+        &self.heap
     }
 }
 
