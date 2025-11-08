@@ -20,7 +20,7 @@
 //! // Create a GC context with automatic background collection
 //! let ctx = GcContext::new();
 //!
-//! // Allocate objects on the GC heap
+//! // Allocate objects on the GC heap (returns GcRoot)
 //! let value = ctx.allocate(42);
 //! let text = ctx.allocate("Hello, GC!");
 //!
@@ -38,9 +38,10 @@ mod trace;
 mod cell;
 
 pub use gc::GcContext;
-pub use ptr::GcPtr;
+pub use ptr::{GcPtr, GcRoot};
 pub use trace::{Trace, NoTrace, Tracer};
-pub use cell::GcPtrCell;
+pub use cell::GcCell;
+pub use heap::Heap;
 
 #[cfg(test)]
 mod tests {

@@ -5,8 +5,9 @@
 
 use crate::color::Color;
 use crate::gc_box::{GcBox, GcHeader};
+use crate::ptr::GcRoot;
 use crate::trace::{Trace, Tracer};
-use std::ptr::{null_mut, NonNull};
+use std::ptr::null_mut;
 use std::sync::atomic::{AtomicU8, AtomicPtr, AtomicUsize, Ordering};
 use std::sync::Arc;
 
@@ -87,6 +88,12 @@ impl Heap {
             gray_queue: parking_lot::Mutex::new(GrayQueue::new()),
         })
     }
+
+    pub fn with_options(_concurrent: bool, _collection_interval: std::time::Duration) -> Arc<Self> {
+        // For now, just use the same configuration as new()
+        // TODO: Add support for configuring concurrent collection and collection interval
+        Self::new()
+    }
     
     /// Get the current GC phase
     #[allow(dead_code)]
@@ -103,7 +110,11 @@ impl Heap {
     /// 
     /// Used by write barriers to shade objects that are being written during marking.
     /// If the object is white, transitions it to gray and adds to the gray queue.
-    pub fn mark_gray(&self, header: *const GcHeader) {
+    ///
+    /// # Safety
+    /// 
+    /// The header pointer must be valid and point to a properly initialized GcHeader.
+    pub unsafe fn mark_gray(&self, header: *const GcHeader) {
         if header.is_null() {
             return;
         }
@@ -120,8 +131,8 @@ impl Heap {
                 // Successfully transitioned - add to gray queue
                 self.gray_queue.lock().push(header);
             }
-            // If already gray or black, nothing to do
         }
+        // If already gray or black, nothing to do
     }
     
     /// Check if a collection should be triggered
@@ -129,7 +140,7 @@ impl Heap {
         self.bytes_allocated.load(Ordering::Relaxed) >= self.threshold.load(Ordering::Relaxed)
     }
 
-    pub fn allocate<T: Trace>(&self, data: T) -> NonNull<GcBox<T>> {
+    pub fn allocate<T: Trace>(&self, data: T) -> GcRoot<T> {
         let ptr = GcBox::new(data);
         let size = unsafe { (*ptr.as_ptr()).header.vtable.layout.size() };
         
@@ -153,7 +164,9 @@ impl Heap {
         }
         
         self.bytes_allocated.fetch_add(size, Ordering::Relaxed);
-        ptr
+        
+        // Return as GcRoot (already rooted with root_count = 1)
+        unsafe { GcRoot::new_from_nonnull(ptr) }
     }
 
     /// Begin incremental marking phase

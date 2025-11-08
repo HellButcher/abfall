@@ -7,7 +7,7 @@
 //! 4. All threads allocate and mutate GC objects concurrently
 //! 5. The GC runs concurrently with allocations
 
-use abfall::{GcContext, GcPtr, GcPtrCell, Trace, Tracer};
+use abfall::{GcContext, GcPtr, GcCell, Trace, Tracer};
 use std::sync::{Arc, Barrier};
 use std::thread;
 use std::time::Duration;
@@ -17,7 +17,7 @@ use std::time::Duration;
 struct Node {
     id: usize,
     value: i32,
-    next: GcPtrCell<Option<GcPtr<Node>>>,
+    next: GcCell<Option<GcPtr<Node>>>,
 }
 
 unsafe impl Trace for Node {
@@ -40,7 +40,7 @@ fn main() {
     let root = ctx.allocate(Node {
         id: 0,
         value: 0,
-        next: GcPtrCell::new(None),
+        next: GcCell::new(None),
     });
     println!("Created root node (id=0)\n");
 
@@ -60,12 +60,9 @@ fn main() {
 
             thread::spawn(move || {
                 // Set up thread-local GC context with shared heap
-                // We manually set the thread-local heap instead of creating a new GcContext
-                // This allows us to share the same heap across threads
-                // TODO: make new GcContext from heap for this thread
-                // TODO: GcContext should not be Send or Sync to prevent misuse
-                //       GcContext should only be created through the Heap which links it to the correct thread
-                let ctx: GcContext = todo!();
+                // Each thread gets its own GcContext pointing to the shared heap
+                // GcContext is !Send + !Sync, so it can't accidentally be moved between threads
+                let ctx = GcContext::with_heap(heap);
 
                 println!("Thread {} ready", thread_id);
                 barrier.wait();
@@ -77,13 +74,13 @@ fn main() {
                         ctx.allocate(Node {
                             id: thread_id * 1000 + i,
                             value: (thread_id * 100 + i) as i32,
-                            next: GcPtrCell::new(None),
+                            next: GcCell::new(None),
                         });
 
                     // Occasionally link to root (creates cross-thread references)
                     if i % 10 == 0 {
                         let current_next = root.next.get();
-                        root.next.set(Some(node.clone()));
+                        root.next.set(Some(node.as_ptr()));
                         node.next.set(current_next);
                         
                         println!(
@@ -149,16 +146,16 @@ fn main() {
 
     // Final statistics
     println!("\n=== Final Statistics ===");
-    println!("Allocations: {}", ctx.allocation_count());
-    println!("Bytes allocated: {}", ctx.bytes_allocated());
+    println!("Allocations: {}", ctx.heap().allocation_count());
+    println!("Bytes allocated: {}", ctx.heap().bytes_allocated());
 
     // Perform final full collection
     println!("\nPerforming final collection...");
     ctx.collect();
     
     println!("After collection:");
-    println!("  Allocations: {}", ctx.allocation_count());
-    println!("  Bytes allocated: {}", ctx.bytes_allocated());
+    println!("  Allocations: {}", ctx.heap().allocation_count());
+    println!("  Bytes allocated: {}", ctx.heap().bytes_allocated());
 
     // Traverse from root to count reachable nodes
     let mut reachable = 0;
@@ -166,30 +163,17 @@ fn main() {
     let mut visited = std::collections::HashSet::new();
     
     while let Some(node_ptr) = current {
-        let node_id = node_ptr.id;
+        // Root the pointer to access fields
+        let node = unsafe { node_ptr.root() };
+        let node_id = node.id;
         if visited.contains(&node_id) {
             break; // Cycle detected
         }
         visited.insert(node_id);
         reachable += 1;
-        current = node_ptr.next.get();
+        current = node.next.get();
     }
     
     println!("\nReachable nodes from root: {}", reachable);
     println!("\n=== Example Complete ===");
-}
-
-// Re-export the current_heap function for this example
-mod gc {
-    use std::cell::RefCell;
-    use std::sync::Arc;
-    
-    thread_local! {
-        pub static CURRENT_HEAP: RefCell<Option<Arc<abfall::heap::Heap>>> = RefCell::new(None);
-    }
-}
-
-// We need access to the internal heap module - add this to the public API
-pub mod heap {
-    pub use abfall::heap::Heap;
 }

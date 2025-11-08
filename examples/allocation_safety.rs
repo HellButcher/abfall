@@ -28,14 +28,16 @@ fn main() {
 fn test_concurrent_allocation_basic() {
     println!("Test 1: Basic concurrent allocation");
     
-    let ctx = Arc::new(GcContext::with_options(false, Duration::from_secs(10)));
+    let ctx = GcContext::with_options(false, Duration::from_secs(10));
+    let heap = Arc::clone(ctx.heap());
     let mut handles = vec![];
     
     for i in 0..10 {
-        let ctx_clone = Arc::clone(&ctx);
+        let heap_clone = Arc::clone(&heap);
         let handle = thread::spawn(move || {
+            let ctx = GcContext::with_heap(heap_clone);
             for j in 0..100 {
-                let _val = ctx_clone.allocate(Value { data: i * 100 + j });
+                let _val = ctx.allocate(Value { data: i * 100 + j });
             }
         });
         handles.push(handle);
@@ -54,7 +56,7 @@ fn test_concurrent_allocation_basic() {
 fn test_allocation_during_collection() {
     println!("Test 2: Allocation during active collection");
     
-    let ctx = Arc::new(GcContext::with_options(false, Duration::from_secs(10)));
+    let ctx = GcContext::with_options(false, Duration::from_secs(10));
     
     // Pre-allocate some objects
     for i in 0..100 {
@@ -62,19 +64,22 @@ fn test_allocation_during_collection() {
     }
     
     let barrier = Arc::new(Barrier::new(3));
+    let heap = Arc::clone(ctx.heap());
     
     // Thread 1: Start collection
-    let ctx1 = Arc::clone(&ctx);
+    let heap1 = Arc::clone(&heap);
     let barrier1 = Arc::clone(&barrier);
     let h1 = thread::spawn(move || {
+        let ctx1 = GcContext::with_heap(heap1);
         barrier1.wait(); // Synchronize start
         ctx1.collect();
     });
     
     // Thread 2: Allocate during collection
-    let ctx2 = Arc::clone(&ctx);
+    let heap2 = Arc::clone(&heap);
     let barrier2 = Arc::clone(&barrier);
     let h2 = thread::spawn(move || {
+        let ctx2 = GcContext::with_heap(heap2);
         barrier2.wait(); // Synchronize start
         thread::sleep(Duration::from_micros(100)); // Let collection start
         
@@ -107,21 +112,23 @@ fn test_allocation_during_collection() {
 fn test_high_contention_allocation() {
     println!("Test 3: High contention allocation (no concurrent GC)");
     
-    let ctx = Arc::new(GcContext::with_options(false, Duration::from_secs(100)));
+    let ctx = GcContext::with_options(false, Duration::from_secs(100));
+    let heap = Arc::clone(ctx.heap());
     let barrier = Arc::new(Barrier::new(10));
     let mut handles = vec![];
     
     // 10 allocator threads
     for thread_id in 0..10 {
-        let ctx_clone = Arc::clone(&ctx);
+        let heap_clone = Arc::clone(&heap);
         let barrier_clone = Arc::clone(&barrier);
         
         let handle = thread::spawn(move || {
+            let ctx = GcContext::with_heap(heap_clone);
             barrier_clone.wait(); // Synchronize start
             
             let mut live = vec![];
             for i in 0..20 {
-                let val = ctx_clone.allocate(Value { 
+                let val = ctx.allocate(Value { 
                     data: thread_id * 1000 + i 
                 });
                 

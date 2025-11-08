@@ -1,6 +1,6 @@
 //! Test GcPtrCell with write barriers and incremental collection
 
-use abfall::{GcPtrCell, GcContext, Trace, Tracer};
+use abfall::{GcCell, GcContext, GcPtr, Trace, Tracer};
 
 struct Counter {
     value: i32,
@@ -14,7 +14,7 @@ unsafe impl Trace for Counter {
 
 struct Node {
     id: i32,
-    target: GcPtrCell<Counter>,
+    target: GcCell<GcPtr<Counter>>,
 }
 
 unsafe impl Trace for Node {
@@ -37,15 +37,18 @@ fn main() {
     // Create node pointing to counter_a
     let node = ctx.allocate(Node {
         id: 1,
-        target: GcPtrCell::new(counter_a.clone()),
+        target: GcCell::new(counter_a.as_ptr()),
     });
 
-    println!("Node {} -> Counter {}", node.id, node.target.get().value);
+    // Access the counter through rooting
+    let target = unsafe { node.target.get().root() };
+    println!("Node {} -> Counter {}", node.id, target.value);
 
     // Change node to point to counter_b
     println!("\nChanging node target to counter_b...");
-    node.target.set(counter_b.clone());
-    println!("Node {} -> Counter {}", node.id, node.target.get().value);
+    node.target.set(counter_b.as_ptr());
+    let target = unsafe { node.target.get().root() };
+    println!("Node {} -> Counter {}", node.id, target.value);
 
     // Now test write barrier during incremental GC
     println!("\n=== Testing Write Barrier During Incremental GC ===");
@@ -58,7 +61,7 @@ fn main() {
     // Mutate during marking - write barrier should shade counter_c gray
     println!("Mutating node target to counter_c during marking...");
     println!("  Write barrier will shade counter_c gray");
-    node.target.set(counter_c.clone());
+    node.target.set(counter_c.as_ptr());
     
     // Complete marking
     println!("Completing marking...");
@@ -70,8 +73,9 @@ fn main() {
     
     // Verify counter_c is still alive
     println!("\nAfter GC:");
-    println!("  Node {} -> Counter {}", node.id, node.target.get().value);
-    assert_eq!(node.target.get().value, 300);
+    let target = unsafe { node.target.get().root() };
+    println!("  Node {} -> Counter {}", node.id, target.value);
+    assert_eq!(target.value, 300);
 
     // Drop counter_a and counter_b, collect
     println!("\nDropping counter_a and counter_b, running GC...");
@@ -80,8 +84,9 @@ fn main() {
     ctx.collect();
 
     // counter_c should still be alive (pointed to by node)
-    println!("After GC: Node {} -> Counter {}", node.id, node.target.get().value);
-    assert_eq!(node.target.get().value, 300);
+    let target = unsafe { node.target.get().root() };
+    println!("After GC: Node {} -> Counter {}", node.id, target.value);
+    assert_eq!(target.value, 300);
 
     println!("\n✓ Write barrier test passed - tri-color invariant maintained!");
 }

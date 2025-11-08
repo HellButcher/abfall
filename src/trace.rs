@@ -77,7 +77,7 @@ impl Tracer {
 /// # Example
 ///
 /// ```
-/// use abfall::{Trace, Tracer, GcPtr};
+/// use abfall::{Trace, Tracer, GcPtr, GcRoot};
 ///
 /// struct Node {
 ///     value: i32,

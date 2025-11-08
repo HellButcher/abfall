@@ -22,27 +22,35 @@ fn main() {
     let ctx = Arc::new(GcContext::with_options(false, std::time::Duration::from_secs(1)));
     
     // Create a linked list: 1 -> 2 -> 3
-    // Note: We move the nodes, not clone them
+    // We use .as_ptr() to get GcPtr for storage in next field
     println!("Creating linked list: 1 -> 2 -> 3");
-    let node1 = ctx.allocate(Node { 
-        value: 1, 
-        next: Some(ctx.allocate(Node {
+    
+    let node1 = {
+        let node3 = ctx.allocate(Node {
+            value: 3,
+            next: None
+        });
+        let node2 = ctx.allocate(Node {
             value: 2,
-            next: Some(ctx.allocate(Node {
-                value: 3,
-                next: None
-            }))
-        }))
-    });
+            next: Some(node3.as_ptr())
+        });
+        ctx.allocate(Node { 
+            value: 1, 
+            next: Some(node2.as_ptr())
+        })
+        // node2 and node3 GcRoots are dropped here, but they're still reachable via node1
+    };
     
     println!("Allocations: {}, Bytes: {}", ctx.allocation_count(), ctx.bytes_allocated());
     
     // Traverse the list
     println!("\nTraversing list:");
-    let mut current = Some(node1.clone());
-    while let Some(node) = current {
+    let mut current = Some(node1.as_ptr());
+    while let Some(ptr) = current {
+        // Root the pointer to access it
+        let node = unsafe { ptr.root() };
         println!("  Node value: {}", node.value);
-        current = node.next.clone();
+        current = node.next;
     }
     
     println!("\nAll nodes only reachable through node1");
@@ -56,10 +64,11 @@ fn main() {
     
     // Verify list is still intact
     println!("\nVerifying list is still intact:");
-    let mut current = Some(node1.clone());
-    while let Some(node) = current {
+    let mut current = Some(node1.as_ptr());
+    while let Some(ptr) = current {
+        let node = unsafe { ptr.root() };
         println!("  Node value: {}", node.value);
-        current = node.next.clone();
+        current = node.next;
     }
     
     // Now drop the head

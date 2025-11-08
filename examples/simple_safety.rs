@@ -20,16 +20,16 @@ fn main() {
     let v2 = ctx.allocate(Value { data: 2 });
     let v3 = ctx.allocate(Value { data: 3 });
     
-    println!("Allocated 3 objects: count = {}", ctx.allocation_count());
-    assert_eq!(ctx.allocation_count(), 3);
+    println!("Allocated 3 objects: count = {}", ctx.heap().allocation_count());
+    assert_eq!(ctx.heap().allocation_count(), 3);
     
     drop(v2);
     drop(v3);
-    println!("Dropped 2 objects: count = {}", ctx.allocation_count());
+    println!("Dropped 2 objects: count = {}", ctx.heap().allocation_count());
     
     ctx.collect();
-    println!("After GC: count = {}", ctx.allocation_count());
-    assert_eq!(ctx.allocation_count(), 1);
+    println!("After GC: count = {}", ctx.heap().allocation_count());
+    assert_eq!(ctx.heap().allocation_count(), 1);
     assert_eq!(v1.data, 1);
     
     println!("✓ Test passed!\n");
@@ -44,7 +44,7 @@ fn main() {
             for j in 0..10 {
                 let _ = ctx.allocate(Value { data: i * 10 + j });
             }
-            let count = ctx.allocation_count();
+            let count = ctx.heap().allocation_count();
             println!("Thread {} allocated {} objects", i, count);
             assert_eq!(count, 10);
         }));
@@ -55,7 +55,7 @@ fn main() {
     }
     
     // Main thread's context still has 1 object
-    let count_main = ctx.allocation_count();
+    let count_main = ctx.heap().allocation_count();
     println!("Main thread: count = {}", count_main);
     assert_eq!(count_main, 1);
     

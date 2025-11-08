@@ -36,7 +36,7 @@ fn basic_allocation() {
     println!("  Number: {}", *number);
     println!("  Text: {}", *text);
     println!("  Vector: {:?}", *vector);
-    println!("  Allocations: {}", ctx.allocation_count());
+    println!("  Allocations: {}", ctx.heap().allocation_count());
 }
 
 fn manual_collection() {
@@ -50,8 +50,8 @@ fn manual_collection() {
     let _ptr5 = ctx.allocate(5);
 
     println!("  Before collection: {} allocations, {} bytes",
-             ctx.allocation_count(),
-             ctx.bytes_allocated());
+             ctx.heap().allocation_count(),
+             ctx.heap().bytes_allocated());
 
     // Drop some pointers
     drop(_ptr2);
@@ -59,14 +59,14 @@ fn manual_collection() {
     drop(_ptr4);
     drop(_ptr5);
 
-    println!("  After drops (before GC): {} allocations", ctx.allocation_count());
+    println!("  After drops (before GC): {} allocations", ctx.heap().allocation_count());
 
     // Manually trigger collection
     ctx.collect();
 
     println!("  After collection: {} allocations, {} bytes",
-             ctx.allocation_count(),
-             ctx.bytes_allocated());
+             ctx.heap().allocation_count(),
+             ctx.heap().bytes_allocated());
     println!("  ptr1 still alive: {}", *ptr1);
 }
 
@@ -106,14 +106,14 @@ fn memory_pressure() {
     }
 
     println!("  Before collection: {} allocations, {} bytes",
-             ctx.allocation_count(),
-             ctx.bytes_allocated());
+             ctx.heap().allocation_count(),
+             ctx.heap().bytes_allocated());
 
     // Force collection
     ctx.collect();
 
     println!("  After collection: {} allocations, {} bytes",
-             ctx.allocation_count(),
-             ctx.bytes_allocated());
+             ctx.heap().allocation_count(),
+             ctx.heap().bytes_allocated());
     println!("  Live objects kept: {}", live_objects.len());
 }
