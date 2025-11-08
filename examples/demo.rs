@@ -1,5 +1,4 @@
 use abfall::GcContext;
-use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
@@ -41,7 +40,7 @@ fn basic_allocation() {
 }
 
 fn manual_collection() {
-    let ctx = GcContext::with_options(false, Duration::from_secs(1));
+    let ctx = GcContext::new();
 
     println!("  Allocating 5 objects...");
     let ptr1 = ctx.allocate(1);
@@ -72,15 +71,13 @@ fn manual_collection() {
 }
 
 fn concurrent_allocation() {
-    let ctx = Arc::new(GcContext::new());
+    println!("  Spawning 8 threads, each with their own GC context...");
     let mut handles = vec![];
 
-    println!("  Spawning 8 threads to allocate concurrently...");
-
     for i in 0..8 {
-        let ctx_clone = Arc::clone(&ctx);
         let handle = thread::spawn(move || {
-            let value = ctx_clone.allocate(i * 100);
+            let ctx = GcContext::new();
+            let value = ctx.allocate(i * 100);
             thread::sleep(Duration::from_millis(10));
             println!("  Thread {} allocated: {}", i, *value);
         });
@@ -91,11 +88,11 @@ fn concurrent_allocation() {
         handle.join().unwrap();
     }
 
-    println!("  Final allocation count: {}", ctx.allocation_count());
+    println!("  Each thread had its own GC heap");
 }
 
 fn memory_pressure() {
-    let ctx = GcContext::with_options(false, Duration::from_millis(100));
+    let ctx = GcContext::new();
 
     println!("  Allocating many objects...");
     let mut live_objects = Vec::new();

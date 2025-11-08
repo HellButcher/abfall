@@ -1,19 +1,19 @@
-# GC Improvement Plan - Concurrent Tri-Color Mark & Sweep
+# GC Improvement Plan - Thread-Local Context Refactor
 
-## Status: 6/7 Phases Complete (86%)
+## Status: Phase 7 - Pointer-size optimization
 
-**Branch**: `feat/improved-gc` | **Commits**: 13 | **Tests**: ✓ All passing
+**Objective**: Reduce GcPtr to pointer-size via thread-local context
 
-### Completed ✅
-1. Lock-free intrusive list + type-erased headers
-2. Trace trait system for graph traversal
-3. Allocation safety (root_count=1, no race)
-4. VTable + Box allocation (proper Drop)
-5. Incremental marking (Go GC-inspired)
-6. Write barriers & GcCell
+### Phases
+1. ✅ Foundation (Phases 1-6 complete)
+2. 🔄 Thread-local context (Phase 7)
+3. 🔮 Future optimizations
 
-### In Progress 🔄
-7. Optimization & tuning (future)
+### Changes in Phase 7
+- Thread-local GC context (no heap ptr in GcPtr/GcPtrCell)
+- RAII guard for context management
+- Simplified allocation API
+- Remove redundant GcCell wrapper
 
 ---
 

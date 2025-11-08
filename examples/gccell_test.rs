@@ -1,7 +1,6 @@
 //! Test GcPtrCell with write barriers and incremental collection
 
 use abfall::{GcPtrCell, GcContext, Trace, Tracer};
-use std::sync::Arc;
 
 struct Counter {
     value: i32,
@@ -38,7 +37,7 @@ fn main() {
     // Create node pointing to counter_a
     let node = ctx.allocate(Node {
         id: 1,
-        target: GcPtrCell::new(counter_a.clone(), Arc::clone(ctx.heap())),
+        target: GcPtrCell::new(counter_a.clone()),
     });
 
     println!("Node {} -> Counter {}", node.id, node.target.get().value);
@@ -53,8 +52,8 @@ fn main() {
     
     // Start marking phase
     println!("Starting incremental GC (marking phase)...");
-    ctx.heap().begin_mark();
-    assert!(ctx.heap().is_marking());
+    ctx.begin_mark();
+    assert!(ctx.is_marking());
     
     // Mutate during marking - write barrier should shade counter_c gray
     println!("Mutating node target to counter_c during marking...");
@@ -63,11 +62,11 @@ fn main() {
     
     // Complete marking
     println!("Completing marking...");
-    while !ctx.heap().do_mark_work(10) {}
+    while !ctx.do_mark_work(10) {}
     
     // Sweep
     println!("Sweeping...");
-    ctx.heap().sweep();
+    ctx.sweep();
     
     // Verify counter_c is still alive
     println!("\nAfter GC:");

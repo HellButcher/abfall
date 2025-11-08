@@ -4,10 +4,9 @@
 //! on the GC heap. As long as at least one `GcPtr` exists for an object,
 //! it is considered a root and will not be collected.
 
-use crate::heap::{GcBox, GcHeader, Heap};
+use crate::gc_box::{GcBox, GcHeader};
 use std::ops::Deref;
 use std::ptr::NonNull;
-use std::sync::Arc;
 
 /// Smart pointer to a GC-managed object
 ///
@@ -16,16 +15,18 @@ use std::sync::Arc;
 ///
 /// Implements `Deref` for transparent access to the underlying value.
 /// Following Rc/Arc semantics, only provides shared references.
+/// 
+/// **Size**: GcPtr is pointer-sized (8 bytes on 64-bit). The heap reference
+/// is accessed via thread-local storage, not stored in the pointer.
 pub struct GcPtr<T> {
     ptr: NonNull<GcBox<T>>,
-    heap: Arc<Heap>,
 }
 
 impl<T> GcPtr<T> {
-    pub(crate) fn new(ptr: NonNull<GcBox<T>>, heap: Arc<Heap>) -> Self {
+    pub(crate) fn new(ptr: NonNull<GcBox<T>>) -> Self {
         // Don't increment root_count - already initialized to 1 in GcHeader::new
         // This prevents a race window where root_count could be 0
-        Self { ptr, heap }
+        Self { ptr }
     }
 
     /// Get a raw pointer to the managed object
@@ -57,10 +58,7 @@ impl<T> Clone for GcPtr<T> {
         unsafe {
             self.ptr.as_ref().header.inc_root();
         }
-        Self {
-            ptr: self.ptr,
-            heap: Arc::clone(&self.heap),
-        }
+        Self { ptr: self.ptr }
     }
 }
 

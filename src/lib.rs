@@ -31,15 +31,16 @@
 
 mod gc;
 mod color;
+mod gc_box;
 mod heap;
 mod ptr;
 mod trace;
 mod cell;
 
-pub use gc::{Gc, GcContext};
+pub use gc::GcContext;
 pub use ptr::GcPtr;
 pub use trace::{Trace, NoTrace, Tracer};
-pub use cell::{GcPtrCell, GcRefCell, GcRef, GcRefMut};
+pub use cell::GcPtrCell;
 
 #[cfg(test)]
 mod tests {
@@ -60,26 +61,5 @@ mod tests {
         drop(_ptr2);
         ctx.collect();
         assert_eq!(*ptr1, 100);
-    }
-
-    #[test]
-    fn concurrent_allocation() {
-        use std::sync::Arc;
-        use std::thread;
-
-        let ctx = Arc::new(GcContext::new());
-        let mut handles = vec![];
-
-        for i in 0..4 {
-            let ctx_clone = Arc::clone(&ctx);
-            let handle = thread::spawn(move || {
-                let _ptr = ctx_clone.allocate(i);
-            });
-            handles.push(handle);
-        }
-
-        for handle in handles {
-            handle.join().unwrap();
-        }
     }
 }

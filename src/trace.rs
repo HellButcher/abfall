@@ -4,7 +4,8 @@
 //! in garbage collection. The trait allows the GC to traverse object graphs and
 //! mark reachable objects.
 
-use crate::heap::{GcHeader, Heap};
+use crate::gc_box::GcHeader;
+use crate::heap::Heap;
 use std::sync::{Arc, Weak};
 
 /// A tracer for marking reachable objects

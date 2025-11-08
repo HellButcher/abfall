@@ -1,5 +1,4 @@
 use abfall::{GcContext, Trace, Tracer};
-use std::sync::Arc;
 use std::thread;
 
 struct Value {
@@ -13,7 +12,7 @@ unsafe impl Trace for Value {
 fn main() {
     println!("=== Simple Allocation Safety Test ===\n");
     
-    let ctx = Arc::new(GcContext::with_options(false, std::time::Duration::from_secs(10)));
+    let ctx = GcContext::new();
     
     // Test 1: Allocation safety - objects start rooted
     println!("Test: Objects are immediately rooted");
@@ -35,16 +34,19 @@ fn main() {
     
     println!("✓ Test passed!\n");
     
-    // Test 2: Multiple threads allocating concurrently
-    println!("Test: Concurrent allocation from multiple threads");
+    // Test 2: Multiple threads with separate heaps
+    println!("Test: Each thread has its own GC heap");
     let mut handles = vec![];
     
     for i in 0..5 {
-        let ctx = Arc::clone(&ctx);
         handles.push(thread::spawn(move || {
+            let ctx = GcContext::new();
             for j in 0..10 {
                 let _ = ctx.allocate(Value { data: i * 10 + j });
             }
+            let count = ctx.allocation_count();
+            println!("Thread {} allocated {} objects", i, count);
+            assert_eq!(count, 10);
         }));
     }
     
@@ -52,17 +54,12 @@ fn main() {
         h.join().unwrap();
     }
     
-    let count_before = ctx.allocation_count();
-    println!("After concurrent allocation: count = {}", count_before);
-    assert!(count_before >= 51); // 1 from before + 50 new
-    
-    // Keep v1 alive, collect everything else
-    ctx.collect();
-    let count_after = ctx.allocation_count();
-    println!("After GC: count = {}", count_after);
-    assert_eq!(count_after, 1); // Only v1 remains
+    // Main thread's context still has 1 object
+    let count_main = ctx.allocation_count();
+    println!("Main thread: count = {}", count_main);
+    assert_eq!(count_main, 1);
     
     println!("✓ Test passed!\n");
     
-    println!("✅ ALL TESTS PASSED - Allocation safety fix works!");
+    println!("✅ ALL TESTS PASSED - Thread-local GC works!");
 }
