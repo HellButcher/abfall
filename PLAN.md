@@ -9,6 +9,7 @@
 6. Refine borrowing model (Rc/Arc-like)
 7. Add GcCell for write barriers
 8. **NEW:** Ensure allocation safety (objects rooted until linked)
+9. **NEW:** Use Box allocation + VTable for proper Drop semantics
 
 ## Phase 1: Core Data Structure Improvements ✅ COMPLETE
 
@@ -169,21 +170,98 @@ GcPtr::drop() DOES decrement
 - Allocate as White during Idle/Sweeping
 - Provides stronger guarantees for incremental collection
 
-## Phase 4: Incremental Marking
+## Phase 4: VTable-Based Type Erasure & Box Allocation
 
-### 4.1 Work-Based Incremental Marking
+**Priority: HIGH - Fix memory management architecture**
+
+### 4.1 Problem: Current Manual Memory Management
+
+**Issues with current approach:**
+```rust
+// Current (PROBLEMATIC):
+impl<T> GcBox<T> {
+    pub fn new(...) -> NonNull<GcBox<T>> {
+        let layout = Layout::new::<GcBox<T>>();
+        let ptr = alloc(layout) as *mut GcBox<T>;  // Manual alloc
+        ptr.write(GcBox { ... });
+    }
+}
+
+// During sweep:
+let layout = Layout::for_value(&*current);  // Recompute layout!
+dealloc(current as *mut u8, layout);        // Manual dealloc
+// Problem: No Drop::drop() called! Memory leak for types with Drop
+```
+
+**Problems:**
+1. Using raw `alloc`/`dealloc` bypasses Rust's drop semantics
+2. Must recompute `Layout` during deallocation (expensive)
+3. Types with `Drop` implementations leak resources
+4. No type safety guarantees
+
+### 4.2 Solution: VTable + Box Allocation
+
+**VTable Design:**
+```rust
+/// Type-erased vtable for GC operations
+pub struct GcVTable {
+    /// Trace function for marking
+    pub trace: unsafe fn(*const GcHeader, &mut Vec<*const GcHeader>),
+    /// Drop function - uses Box::from_raw
+    pub drop: unsafe fn(*mut GcHeader),
+    /// Size for statistics
+    pub size: usize,
+    /// Alignment requirement
+    pub align: usize,
+}
+
+impl GcVTable {
+    pub const fn new<T: Trace>() -> &'static Self {
+        &GcVTable {
+            trace: trace_impl::<T>,
+            drop: drop_impl::<T>,
+            size: std::mem::size_of::<GcBox<T>>(),
+            align: std::mem::align_of::<GcBox<T>>(),
+        }
+    }
+}
+
+unsafe fn drop_impl<T>(ptr: *mut GcHeader) {
+    let gc_box_ptr = ptr as *mut GcBox<T>;
+    let _box = Box::from_raw(gc_box_ptr);
+    // Box::drop automatically called!
+}
+```
+
+**Benefits:**
+- Proper Drop semantics
+- No Layout recomputation
+- Type-safe deallocation
+- Cached size information
+
+### 4.3 Implementation Steps
+
+1. [ ] Design GcVTable struct
+2. [ ] Update GcHeader with vtable field
+3. [ ] Rewrite GcBox::new using Box::new + leak
+4. [ ] Update sweep to use vtable.drop
+5. [ ] Test with Drop types (String, Vec, etc.)
+
+## Phase 5: Incremental Marking
+
+### 5.1 Work-Based Incremental Marking
 - Track marking progress
 - Limit work per increment (e.g., 100 objects)
 - Interleave with mutator (application code)
 
-### 4.2 Snapshot-At-Beginning (SATB)
+### 5.2 Snapshot-At-Beginning (SATB)
 - Record pointer updates during marking
 - Use write barrier to maintain snapshot
 - Ensures no objects are lost during concurrent marking
 
-## Phase 5: Improved Borrowing Model & Write Barriers
+## Phase 6: Improved Borrowing Model & Write Barriers
 
-### 5.1 Immutable-Only GcPtr
+### 6.1 Immutable-Only GcPtr
 ```rust
 impl<T> GcPtr<T> {
     pub fn as_ref(&self) -> &T {
@@ -194,7 +272,7 @@ impl<T> GcPtr<T> {
 }
 ```
 
-### 5.2 Interior Mutability with GcCell
+### 6.2 Interior Mutability with GcCell
 ```rust
 pub struct GcCell<T> {
     value: UnsafeCell<T>,
@@ -220,7 +298,7 @@ struct Node {
 }
 ```
 
-### 5.3 Write Barrier Implementation
+### 6.3 Write Barrier Implementation
 ```rust
 struct WriteBarrier {
     // Track writes during marking
@@ -248,11 +326,11 @@ struct WriteBarrier {
 2. Implement work budgets
 3. Add incremental mark API
 
-## Phase 6: Optimization
+## Phase 7: Optimization
 
-### 6.1 Benchmark performance
-### 6.2 Optimize hot paths
-### 6.3 Tune collection heuristics
+### 7.1 Benchmark performance
+### 7.2 Optimize hot paths  
+### 7.3 Tune collection heuristics
 
 ## Implementation Status
 
@@ -260,11 +338,12 @@ struct WriteBarrier {
 - **Step 1:** Core data structures (lock-free list, type-erased headers)
 - **Step 2:** Trace trait system (graph traversal)
 
-### 🔄 In Progress / Next
-- **Step 3:** Allocation safety fixes (CRITICAL - addresses race conditions)
-- **Step 4:** Incremental marking
-- **Step 5:** Write barriers & GcCell
-- **Step 6:** Optimization pass
+### 🔄 Next Priority
+- **Step 3:** Allocation safety fixes (CRITICAL - race conditions)
+- **Step 4:** VTable + Box allocation (CRITICAL - proper Drop semantics)
+- **Step 5:** Incremental marking
+- **Step 6:** Write barriers & GcCell
+- **Step 7:** Optimization pass
 
 ## Current Branch Status
 - Branch: `feat/improved-gc`
