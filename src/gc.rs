@@ -4,7 +4,7 @@
 //! Each thread has its own heap, accessed through a RAII guard.
 
 use crate::Tracer;
-use crate::heap::Heap;
+use crate::heap::{GcOptions, Heap};
 use crate::trace::Trace;
 use std::cell::Cell;
 use std::ops::Deref;
@@ -105,9 +105,14 @@ impl GcContext {
         Self::with_heap(heap)
     }
 
+    pub fn off() -> Self {
+        let heap = Heap::off();
+        Self::with_heap(heap)
+    }
+
     /// Create a new GC context and a new Heap with custom options
-    pub fn with_options(concurrent: bool, collection_interval: std::time::Duration) -> Self {
-        let heap = Heap::with_options(concurrent, collection_interval);
+    pub fn with_options(options: GcOptions) -> Self {
+        let heap = Heap::with_options(options);
         Self::with_heap(heap)
     }
 
@@ -167,25 +172,6 @@ impl GcContext {
     /// ```
     pub fn allocate<T: Trace>(&self, data: T) -> crate::GcRoot<T> {
         self.0.heap.allocate(data)
-    }
-
-    /// Manually trigger a garbage collection cycle
-    ///
-    /// This performs a full mark-and-sweep collection.
-    ///
-    /// # Example
-    ///
-    /// ```
-    /// use abfall::GcContext;
-    ///
-    /// let ctx = GcContext::new();
-    /// let ptr = ctx.allocate(100);
-    /// drop(ptr);
-    /// ctx.collect(); // Reclaim memory
-    /// ```
-    pub fn collect(&self) {
-        self.0.heap.mark();
-        self.0.heap.sweep();
     }
 
     /// Get reference to the underlying heap (for advanced use)
