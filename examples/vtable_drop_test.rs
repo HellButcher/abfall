@@ -22,7 +22,7 @@ impl Drop for DropCounter {
 }
 
 unsafe impl Trace for DropCounter {
-    fn trace(&self, _tracer: &mut Tracer) {
+    fn trace(&self, _tracer: &Tracer) {
         // No GC pointers
     }
 }

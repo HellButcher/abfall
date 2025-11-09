@@ -5,63 +5,47 @@
 //! mark reachable objects.
 
 use crate::gc_box::GcHeader;
-use crate::heap::Heap;
-use std::sync::{Arc, Weak};
+use std::{
+    cell::UnsafeCell,
+    collections::{BTreeSet, HashSet, VecDeque},
+    convert::Infallible,
+};
 
 /// A tracer for marking reachable objects
 ///
 /// Used during the mark phase to traverse the object graph
-pub struct Tracer {
-    #[allow(dead_code)]
-    heap: Option<Weak<Heap>>,
-    gray_queue: Vec<*const GcHeader>,
-}
+pub struct Tracer(UnsafeCell<Vec<*const GcHeader>>);
 
 impl Tracer {
     /// Create a new tracer without heap reference (for internal GC use)
     pub(crate) fn new() -> Self {
-        Self {
-            heap: None,
-            gray_queue: Vec::new(),
-        }
-    }
-    
-    /// Create a new tracer with heap reference (for write barriers)
-    #[allow(dead_code)]
-    pub(crate) fn with_heap(heap: Arc<Heap>) -> Self {
-        Self {
-            heap: Some(Arc::downgrade(&heap)),
-            gray_queue: Vec::new(),
-        }
+        Self(UnsafeCell::new(Vec::new()))
     }
 
-    pub(crate) fn gray_queue_mut(&mut self) -> &mut Vec<*const GcHeader> {
-        &mut self.gray_queue
-    }
-    
-    #[allow(dead_code)]
-    pub(crate) fn heap(&self) -> Option<Arc<Heap>> {
-        self.heap.as_ref().and_then(|w| w.upgrade())
+    pub(crate) fn append_to(&self, dest: &mut Vec<*const GcHeader>) {
+        dest.append(unsafe { &mut *self.0.get() });
     }
 
     /// Mark an object as reachable
     ///
     /// Adds the object to the gray queue for processing if it's currently white
-    pub fn mark<T>(&mut self, ptr: &crate::GcPtr<T>) {
-        use crate::color::Color;
-        
+    pub fn mark<T: Trace>(&self, ptr: &crate::GcPtr<T>) {
         let header_ptr = ptr.header_ptr();
         unsafe {
             let header = &*header_ptr;
-            // Try to transition White -> Gray
-            if header.color.compare_exchange(
-                Color::White,
-                Color::Gray,
-                std::sync::atomic::Ordering::AcqRel,
-                std::sync::atomic::Ordering::Acquire
-            ).is_ok() {
-                self.gray_queue.push(header_ptr);
+            if T::NO_TRACE {
+                // Immediately mark black if no tracing is needed
+                header.color.mark_black();
+            } else {
+                self.mark_header(header);
             }
+        }
+    }
+
+    pub(crate) fn mark_header(&self, header: &GcHeader) {
+        if header.color.mark_white_to_gray() {
+            // Enqueue for scanning
+            unsafe { &mut *self.0.get() }.push(header);
         }
     }
 }
@@ -85,7 +69,7 @@ impl Tracer {
 /// }
 ///
 /// unsafe impl Trace for Node {
-///     fn trace(&self, tracer: &mut Tracer) {
+///     fn trace(&self, tracer: &Tracer) {
 ///         if let Some(ref next) = self.next {
 ///             tracer.mark(next);
 ///         }
@@ -93,71 +77,134 @@ impl Tracer {
 /// }
 /// ```
 pub unsafe trait Trace {
+    const NO_TRACE: bool = false;
+
     /// Trace all GC pointers in this object
-    fn trace(&self, tracer: &mut Tracer);
+    fn trace(&self, tracer: &Tracer);
 }
 
-/// Marker trait for types that contain no GC pointers
-///
-/// Types implementing `NoTrace` have a default no-op trace implementation.
-///
-/// # Safety
-///
-/// Only implement this for types that contain no `GcPtr` fields.
-pub unsafe trait NoTrace: Trace {}
+macro_rules! impl_no_trace {
+    ($(impl$([$($tt:tt)*])? for $ty:ty);* $(;)?) => {
+        $(
+            unsafe impl$(<$($tt)*>)? Trace for $ty {
+                const NO_TRACE: bool = true;
+                fn trace(&self, _tracer: &Tracer) {
+                    // Nothing to trace
+                }
+            }
+        )*
+    };
+}
 
-// Blanket implementation for NoTrace types
-unsafe impl<T: NoTrace> Trace for T {
-    #[inline]
-    fn trace(&self, _tracer: &mut Tracer) {
-        // Nothing to trace
+impl_no_trace! {
+    impl for ();
+    impl for i8;
+    impl for i16;
+    impl for i32;
+    impl for i64;
+    impl for i128;
+    impl for isize;
+    impl for u8;
+    impl for u16;
+    impl for u32;
+    impl for u64;
+    impl for u128;
+    impl for usize;
+    impl for f32;
+    impl for f64;
+    impl for bool;
+    impl for char;
+    impl for String;
+    impl for &str;
+    impl for Infallible;
+    impl[T] for std::marker::PhantomData<T>;
+}
+
+macro_rules! impl_trace_deref {
+    ($(impl<$i:ident> for $ty:ty);* $(;)?) => {
+        $(
+            unsafe impl<$i: Trace> Trace for $ty {
+                const NO_TRACE: bool = $i::NO_TRACE;
+                fn trace(&self, tracer: &Tracer) {
+                    $i::trace(self, tracer);
+                }
+            }
+        )*
+    };
+}
+
+impl_trace_deref! {
+    impl<T> for Box<T>;
+    impl<T> for std::rc::Rc<T>;
+    impl<T> for std::sync::Arc<T>;
+}
+
+macro_rules! impl_trace_iterable {
+    ($(impl<$i:ident> for $ty:ty);* $(;)?) => {
+        $(
+            unsafe impl<$i: Trace> Trace for $ty {
+                const NO_TRACE: bool = $i::NO_TRACE;
+                fn trace(&self, tracer: &Tracer) {
+                    for item in self {
+                        item.trace(tracer);
+                    }
+                }
+            }
+        )*
+    };
+}
+
+impl_trace_iterable! {
+    impl<T> for Vec<T>;
+    impl<T> for VecDeque<T>;
+    impl<T> for HashSet<T>;
+    impl<T> for BTreeSet<T>;
+}
+
+macro_rules! impl_trace_map {
+    ($(impl<$i:ident, $j:ident> for $ty:ty);* $(;)?) => {
+        $(
+            unsafe impl<$i: Trace,$j: Trace> Trace for $ty {
+                const NO_TRACE: bool = $i::NO_TRACE && $j::NO_TRACE;
+                fn trace(&self, tracer: &Tracer) {
+                    for (k,v) in self.iter() {
+                        k.trace(tracer);
+                        v.trace(tracer);
+                    }
+                }
+            }
+        )*
+    };
+}
+
+impl_trace_map! {
+    impl<K,V> for std::collections::HashMap<K,V>;
+    impl<K,V> for std::collections::BTreeMap<K,V>;
+}
+
+unsafe impl<T: Trace, E: Trace> Trace for Result<T, E> {
+    const NO_TRACE: bool = T::NO_TRACE && E::NO_TRACE;
+    fn trace(&self, tracer: &Tracer) {
+        match self {
+            Ok(value) => value.trace(tracer),
+            Err(err) => err.trace(tracer),
+        }
     }
 }
 
-// Implement NoTrace for common primitive types
-unsafe impl NoTrace for i8 {}
-unsafe impl NoTrace for i16 {}
-unsafe impl NoTrace for i32 {}
-unsafe impl NoTrace for i64 {}
-unsafe impl NoTrace for i128 {}
-unsafe impl NoTrace for isize {}
-
-unsafe impl NoTrace for u8 {}
-unsafe impl NoTrace for u16 {}
-unsafe impl NoTrace for u32 {}
-unsafe impl NoTrace for u64 {}
-unsafe impl NoTrace for u128 {}
-unsafe impl NoTrace for usize {}
-
-unsafe impl NoTrace for f32 {}
-unsafe impl NoTrace for f64 {}
-
-unsafe impl NoTrace for bool {}
-unsafe impl NoTrace for char {}
-
-unsafe impl NoTrace for String {}
-unsafe impl NoTrace for &str {}
-
-// Vec is NoTrace if its element type is NoTrace
-unsafe impl<T: NoTrace> NoTrace for Vec<T> {}
-
-// Option<T> implements Trace for any T: Trace
 unsafe impl<T: Trace> Trace for Option<T> {
-    fn trace(&self, tracer: &mut Tracer) {
+    const NO_TRACE: bool = T::NO_TRACE;
+    fn trace(&self, tracer: &Tracer) {
         if let Some(value) = self {
             value.trace(tracer);
         }
     }
 }
-
-// Result is NoTrace if both types are NoTrace  
-unsafe impl<T: NoTrace, E: NoTrace> NoTrace for Result<T, E> {}
-
-// Tuples are NoTrace if all elements are NoTrace
-unsafe impl<T: NoTrace> NoTrace for (T,) {}
-unsafe impl<T1: NoTrace, T2: NoTrace> NoTrace for (T1, T2) {}
-unsafe impl<T1: NoTrace, T2: NoTrace, T3: NoTrace> NoTrace for (T1, T2, T3) {}
-unsafe impl<T1: NoTrace, T2: NoTrace, T3: NoTrace, T4: NoTrace> NoTrace for (T1, T2, T3, T4) {}
-
-// Arrays are NoTrace if the element type is NoTrace
-unsafe impl<T: NoTrace, const N: usize> NoTrace for [T; N] {}
+unsafe impl<T: Trace, const N: usize> Trace for [T; N] {
+    const NO_TRACE: bool = T::NO_TRACE;
+    fn trace(&self, tracer: &Tracer) {
+        for item in self {
+            item.trace(tracer);
+        }
+    }
+}

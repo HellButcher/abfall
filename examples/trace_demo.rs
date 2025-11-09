@@ -16,7 +16,7 @@ struct Node {
 
 // Implement Trace to tell the GC how to follow pointers
 unsafe impl Trace for Node {
-    fn trace(&self, tracer: &mut Tracer) {
+    fn trace(&self, tracer: &Tracer) {
         if let Some(ref next) = self.next {
             tracer.mark(next);
         }

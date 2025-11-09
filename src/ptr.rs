@@ -8,6 +8,7 @@
 //! one `GcRoot` exists pointing to them.
 
 use crate::gc_box::{GcBox, GcHeader};
+use crate::{Trace, Tracer};
 use std::ops::Deref;
 use std::ptr::NonNull;
 
@@ -18,7 +19,7 @@ use std::ptr::NonNull;
 /// convert it to a `GcRoot` first (which increments the root count).
 ///
 /// **Size**: GcPtr is pointer-sized (8 bytes on 64-bit).
-/// 
+///
 /// Use `GcPtr` in data structures to reference other GC objects without
 /// creating circular root references. Use `GcRoot` to keep objects alive.
 #[repr(transparent)]
@@ -43,6 +44,8 @@ impl<T: ?Sized> GcPtr<T> {
     #[inline]
     pub unsafe fn root(self) -> GcRoot<T> {
         unsafe {
+            // TODO: replace root counter with list/stack in GcContext
+            //   (GcRoot) should borrow a lifetime from GcContext
             self.0.as_ref().header.inc_root();
             GcRoot(self)
         }
@@ -58,7 +61,7 @@ impl<T: ?Sized> GcPtr<T> {
     pub fn as_ptr(&self) -> *const T {
         unsafe { &self.0.as_ref().data as *const T }
     }
-    
+
     /// Get the header pointer for this object (internal use)
     #[inline]
     pub(crate) fn header_ptr(&self) -> *const GcHeader {
@@ -93,7 +96,7 @@ impl<T: ?Sized> GcRoot<T> {
     ///
     /// Used internally during allocation. The object must already be allocated
     /// with root_count initialized to 1.
-    /// 
+    ///
     /// # Safety
     /// ptr must already have its root count initialized to 1.
     #[inline]
@@ -141,8 +144,8 @@ unsafe impl<T: Send> Send for GcRoot<T> {}
 unsafe impl<T: Sync> Sync for GcRoot<T> {}
 
 // GcPtr implements Trace - it marks itself as reachable
-unsafe impl<T> crate::trace::Trace for GcPtr<T> {
-    fn trace(&self, tracer: &mut crate::trace::Tracer) {
+unsafe impl<T: Trace> Trace for GcPtr<T> {
+    fn trace(&self, tracer: &Tracer) {
         tracer.mark(self);
     }
 }

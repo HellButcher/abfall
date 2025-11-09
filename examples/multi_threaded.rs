@@ -21,7 +21,7 @@ struct Node {
 }
 
 unsafe impl Trace for Node {
-    fn trace(&self, tracer: &mut Tracer) {
+    fn trace(&self, tracer: &Tracer) {
         self.next.trace(tracer);
     }
 }
@@ -48,8 +48,8 @@ fn main() {
     const NUM_THREADS: usize = 4;
     const ITERATIONS: usize = 100;
 
-    // Barrier to synchronize thread start
-    let barrier = Arc::new(Barrier::new(NUM_THREADS + 1));
+    // Barrier to synchronize thread start (worker threads + monitor thread + main thread)
+    let barrier = Arc::new(Barrier::new(NUM_THREADS + 2));
 
     // Spawn worker threads
     let handles: Vec<_> = (0..NUM_THREADS)
@@ -64,6 +64,8 @@ fn main() {
 
                 println!("Thread {} ready", thread_id);
                 barrier.wait();
+
+                let mut nodes = Vec::new();
 
                 // Allocate nodes and link them
                 for i in 0..ITERATIONS {
@@ -86,6 +88,8 @@ fn main() {
                         );
                     }
 
+                    nodes.push(node);
+
                     // Small delay to simulate work
                     if i % 20 == 0 {
                         thread::sleep(Duration::from_micros(10));
@@ -96,41 +100,67 @@ fn main() {
                     "Thread {} finished allocating {} nodes",
                     thread_id, ITERATIONS
                 );
+
+                println!("Thread {} ready for phase 2", thread_id);
+                barrier.wait();
+
+                drop(nodes); // Drop local references to allow collection
+                root.next.set(None); // Clear root links
             })
         })
         .collect();
+
+    // Monitor and trigger GC periodically
+    let monitor_handle = {
+        let heap = heap.clone();
+        let barrier = barrier.clone();
+        thread::spawn(move || {
+            println!("Monitor Thread ready");
+            barrier.wait();
+
+            let collect = || {
+                for round in 0..20 {
+                    thread::sleep(Duration::from_millis(5));
+
+                    let bytes = heap.bytes_allocated();
+                    let count = heap.allocation_count();
+
+                    println!(
+                        "[Monitor] Round {}: {} allocations, {} bytes",
+                        round, count, bytes
+                    );
+
+                    // Trigger incremental GC
+                    if bytes > 1024 * 10 {
+                        println!("[Monitor] Triggering GC...");
+                        heap.collect();
+
+                        let bytes_after = heap.bytes_allocated();
+                        let count_after = heap.allocation_count();
+                        println!(
+                            "[Monitor] After GC: {} allocations, {} bytes",
+                            count_after, bytes_after
+                        );
+                    }
+                }
+            };
+
+            collect();
+
+            println!("Monitor Thread ready for phase 2");
+            barrier.wait();
+
+            collect();
+        })
+    };
 
     // Wait for all threads to be ready
     barrier.wait();
     println!("\nAll threads started!\n");
 
-    // Monitor and trigger GC periodically
-    let monitor_handle = {
-        let heap = heap.clone();
-        thread::spawn(move || {
-            for round in 0..10 {
-                thread::sleep(Duration::from_millis(50));
-
-                let bytes = heap.bytes_allocated();
-                let count = heap.allocation_count();
-
-                println!("[Monitor] Round {}: {} allocations, {} bytes", round, count, bytes);
-
-                // Trigger incremental GC
-                if bytes > 1024 * 10 {
-                    println!("[Monitor] Triggering incremental GC...");
-                    heap.collect_incremental(20);
-
-                    let bytes_after = heap.bytes_allocated();
-                    let count_after = heap.allocation_count();
-                    println!(
-                        "[Monitor] After GC: {} allocations, {} bytes",
-                        count_after, bytes_after
-                    );
-                }
-            }
-        })
-    };
+    // Wait for all threads to be ready
+    barrier.wait();
+    println!("\nAll threads in phase 2!\n");
 
     // Wait for worker threads
     for (i, handle) in handles.into_iter().enumerate() {

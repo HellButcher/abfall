@@ -50,9 +50,11 @@ fn manual_collection() {
     let _ptr4 = ctx.allocate(4);
     let _ptr5 = ctx.allocate(5);
 
-    println!("  Before collection: {} allocations, {} bytes",
-             ctx.heap().allocation_count(),
-             ctx.heap().bytes_allocated());
+    println!(
+        "  Before collection: {} allocations, {} bytes",
+        ctx.heap().allocation_count(),
+        ctx.heap().bytes_allocated()
+    );
 
     // Drop some pointers
     drop(_ptr2);
@@ -60,14 +62,19 @@ fn manual_collection() {
     drop(_ptr4);
     drop(_ptr5);
 
-    println!("  After drops (before GC): {} allocations", ctx.heap().allocation_count());
+    println!(
+        "  After drops (before GC): {} allocations",
+        ctx.heap().allocation_count()
+    );
 
     // Manually trigger collection
     ctx.collect();
 
-    println!("  After collection: {} allocations, {} bytes",
-             ctx.heap().allocation_count(),
-             ctx.heap().bytes_allocated());
+    println!(
+        "  After collection: {} allocations, {} bytes",
+        ctx.heap().allocation_count(),
+        ctx.heap().bytes_allocated()
+    );
     println!("  ptr1 still alive: {}", *ptr1);
 }
 

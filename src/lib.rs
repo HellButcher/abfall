@@ -29,19 +29,19 @@
 //! assert_eq!(*text, "Hello, GC!");
 //! ```
 
-mod gc;
+mod cell;
 mod color;
+mod gc;
 mod gc_box;
 mod heap;
 mod ptr;
 mod trace;
-mod cell;
 
-pub use gc::GcContext;
-pub use ptr::{GcPtr, GcRoot};
-pub use trace::{Trace, NoTrace, Tracer};
 pub use cell::GcCell;
+pub use gc::GcContext;
 pub use heap::Heap;
+pub use ptr::{GcPtr, GcRoot};
+pub use trace::{Trace, Tracer};
 
 #[cfg(test)]
 mod tests {

@@ -3,20 +3,62 @@
 //! This module provides thread-local GC context management via `GcContext`.
 //! Each thread has its own heap, accessed through a RAII guard.
 
+use crate::Tracer;
 use crate::heap::Heap;
 use crate::trace::Trace;
-use std::cell::RefCell;
+use std::cell::Cell;
+use std::ops::Deref;
+use std::pin::Pin;
+use std::ptr;
 use std::sync::Arc;
 
 thread_local! {
-    static CURRENT_HEAP: RefCell<Option<Arc<Heap>>> = const { RefCell::new(None) };
+    static CURRENT_CTX: Cell<*const GcContextInner> = const { Cell::new(ptr::null()) };
 }
 
 /// Set the current thread-local heap
-fn set_current_heap(heap: Option<Arc<Heap>>) {
-    CURRENT_HEAP.with(|h| {
-        *h.borrow_mut() = heap;
+fn set_current_context(ctx: &Pin<Box<GcContextInner>>) {
+    let target_ptr: *const GcContextInner = ctx.as_ref().get_ref();
+    CURRENT_CTX.with(|tls| {
+        if !tls.get().is_null() {
+            panic!("A GcContext is already set for this thread");
+        }
+        tls.set(target_ptr);
     });
+}
+
+fn reset_current_context(ctx: &Pin<Box<GcContextInner>>) {
+    let target_ptr: *const GcContextInner = ctx.as_ref().get_ref();
+    CURRENT_CTX.with(|tls| {
+        if tls.get().addr() == target_ptr.addr() {
+            tls.set(ptr::null());
+        }
+    });
+}
+
+pub(crate) fn with_current_tracer(f: impl FnOnce(&Tracer)) -> bool {
+    CURRENT_CTX.with(|tls| {
+        let ctx_ptr = tls.get();
+        if ctx_ptr.is_null() {
+            false
+        } else {
+            // SAFETY: ctx_ptr is valid as long as the GcContext is alive
+            let ctx = unsafe { &*ctx_ptr };
+            f(&ctx.local_gray);
+            true
+        }
+    })
+}
+
+pub(crate) struct GcContextInner {
+    heap: Arc<Heap>,
+    local_gray: Tracer,
+    shared: GcContextHeapShared,
+    _marker: std::marker::PhantomData<*const ()>, // Makes GcContext !Send + !Sync
+}
+
+pub(crate) struct GcContextHeapShared {
+    // TODO: fields that are shared with the Heap
 }
 
 /// RAII guard for GC context
@@ -37,10 +79,7 @@ fn set_current_heap(heap: Option<Arc<Heap>>) {
 /// let value = ctx.allocate(42);
 /// // ctx is dropped here, clearing thread-local context
 /// ```
-pub struct GcContext {
-    heap: Arc<Heap>,
-    _marker: std::marker::PhantomData<*const ()>, // Makes GcContext !Send + !Sync
-}
+pub struct GcContext(Pin<Box<GcContextInner>>);
 
 impl Default for GcContext {
     fn default() -> Self {
@@ -49,7 +88,7 @@ impl Default for GcContext {
 }
 
 impl GcContext {
-    /// Create a new GC context for the current thread
+    /// Create a new GC context and a new Heap for the current thread
     ///
     /// Sets this as the active context for allocations in this thread.
     ///
@@ -63,21 +102,13 @@ impl GcContext {
     /// ```
     pub fn new() -> Self {
         let heap = Heap::new();
-        set_current_heap(Some(Arc::clone(&heap)));
-        Self {
-            heap,
-            _marker: std::marker::PhantomData,
-        }
+        Self::with_heap(heap)
     }
 
-    /// Create a new GC context with custom options
+    /// Create a new GC context and a new Heap with custom options
     pub fn with_options(concurrent: bool, collection_interval: std::time::Duration) -> Self {
         let heap = Heap::with_options(concurrent, collection_interval);
-        set_current_heap(Some(Arc::clone(&heap)));
-        Self {
-            heap,
-            _marker: std::marker::PhantomData,
-        }
+        Self::with_heap(heap)
     }
 
     /// Create a new GC context for the current thread using a shared heap
@@ -104,11 +135,18 @@ impl GcContext {
     /// let result = handle.join().unwrap();
     /// ```
     pub fn with_heap(heap: Arc<Heap>) -> Self {
-        set_current_heap(Some(Arc::clone(&heap)));
-        Self {
+        let inner = Box::pin(GcContextInner {
             heap,
+            local_gray: Tracer::new(),
+            shared: GcContextHeapShared {
+                // Initialize shared fields
+            },
             _marker: std::marker::PhantomData,
-        }
+        });
+        let inner_ref: &GcContextInner = inner.as_ref().get_ref();
+        inner_ref.shared.register_with_heap(inner.heap.as_ref());
+        set_current_context(&inner);
+        GcContext(inner)
     }
 
     /// Allocate an object on the GC heap
@@ -128,7 +166,7 @@ impl GcContext {
     /// assert_eq!(*number, 42);
     /// ```
     pub fn allocate<T: Trace>(&self, data: T) -> crate::GcRoot<T> {
-        self.heap.allocate(data)
+        self.0.heap.allocate(data)
     }
 
     /// Manually trigger a garbage collection cycle
@@ -146,75 +184,29 @@ impl GcContext {
     /// ctx.collect(); // Reclaim memory
     /// ```
     pub fn collect(&self) {
-        self.heap.mark_from_roots();
-        self.heap.sweep();
-    }
-    
-    /// Perform an incremental collection with bounded work per step
-    ///
-    /// This allows the GC to perform work in small increments, reducing
-    /// pause times. The `work_per_step` parameter controls how many objects
-    /// are processed in each marking step.
-    ///
-    /// # Example
-    ///
-    /// ```
-    /// use abfall::GcContext;
-    ///
-    /// let ctx = GcContext::new();
-    /// let ptr = ctx.allocate(100);
-    /// drop(ptr);
-    /// ctx.collect_incremental(10); // Process 10 objects per step
-    /// ```
-    pub fn collect_incremental(&self, work_per_step: usize) {
-        self.heap.collect_incremental(work_per_step);
-    }
-
-    /// Get the number of currently allocated objects
-    pub fn allocation_count(&self) -> usize {
-        self.heap.allocation_count()
-    }
-
-    /// Get the number of bytes currently allocated
-    pub fn bytes_allocated(&self) -> usize {
-        self.heap.bytes_allocated()
-    }
-
-    /// Check if a collection should be triggered
-    pub fn should_collect(&self) -> bool {
-        self.heap.should_collect()
-    }
-
-    /// Begin the mark phase of garbage collection
-    pub fn begin_mark(&self) {
-        self.heap.begin_mark()
-    }
-
-    /// Perform a bounded amount of marking work
-    /// Returns true if marking is complete
-    pub fn do_mark_work(&self, work_budget: usize) -> bool {
-        self.heap.do_mark_work(work_budget)
-    }
-
-    /// Check if currently in marking phase
-    pub fn is_marking(&self) -> bool {
-        self.heap.is_marking()
-    }
-
-    /// Perform the sweep phase of garbage collection
-    pub fn sweep(&self) {
-        self.heap.sweep()
+        self.0.heap.mark();
+        self.0.heap.sweep();
     }
 
     /// Get reference to the underlying heap (for advanced use)
     pub fn heap(&self) -> &Arc<Heap> {
-        &self.heap
+        &self.0.heap
     }
 }
 
 impl Drop for GcContext {
     fn drop(&mut self) {
         // Clear thread-local heap when context is dropped
-        set_current_heap(None);
+        reset_current_context(&self.0);
+        self.0.shared.unregister_from_heap(self.0.heap.as_ref());
+    }
+}
+
+impl Deref for GcContext {
+    type Target = Arc<Heap>;
+
+    #[inline]
+    fn deref(&self) -> &Arc<Heap> {
+        &self.0.heap
     }
 }

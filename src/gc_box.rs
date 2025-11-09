@@ -6,7 +6,7 @@
 use crate::color::{AtomicColor, Color};
 use crate::trace::{Trace, Tracer};
 use std::alloc::Layout;
-use std::ptr::{null_mut, NonNull};
+use std::ptr::{NonNull, null_mut};
 use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
 
 /// Type-erased virtual table for GC operations
@@ -15,46 +15,55 @@ use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
 /// stored statically to avoid per-object overhead.
 pub struct GcVTable {
     /// Trace function for marking reachable objects
-    pub trace: unsafe fn(*const GcHeader, &mut Tracer),
-    
+    pub trace: unsafe fn(*const GcHeader, &Tracer),
+
     /// Drop function - properly drops the object using Box::from_raw
     pub drop: unsafe fn(*mut GcHeader),
-    
+
     /// Layout of the complete GcBox<T>
     pub layout: Layout,
 }
 
 impl GcVTable {
     /// Create a new vtable for type T
-    pub fn new<T: Trace>() -> Self {
-        unsafe fn trace_impl<T: Trace>(ptr: *const GcHeader, tracer: &mut Tracer) {
+    const fn new<T: Trace>() -> Self {
+        // Compile-time assertion: header must be at offset 0 due to repr(C)
+        const _: () = assert!(std::mem::offset_of!(GcBox<()>, header) == 0);
+
+        unsafe fn trace_noop(_ptr: *const GcHeader, _tracer: &Tracer) {
+            // No-op trace for types that have NO_TRACE=true
+        }
+
+        unsafe fn trace_impl<T: Trace>(ptr: *const GcHeader, tracer: &Tracer) {
             unsafe {
                 // Calculate GcBox pointer from header pointer using offset
                 // SAFETY: GcBox is repr(C) so header is at offset 0
-                let gc_box_ptr = (ptr as *const u8).sub(
-                    std::mem::offset_of!(GcBox<T>, header)
-                ) as *const GcBox<T>;
-                
+                let gc_box_ptr = (ptr as *const u8).sub(std::mem::offset_of!(GcBox<T>, header))
+                    as *const GcBox<T>;
+
                 let data = &(*gc_box_ptr).data;
                 data.trace(tracer);
             }
         }
-        
+
         unsafe fn drop_impl<T>(ptr: *mut GcHeader) {
             unsafe {
                 // Calculate GcBox pointer from header pointer using offset
                 // SAFETY: GcBox is repr(C) so header is at offset 0
-                let gc_box_ptr = (ptr as *mut u8).sub(
-                    std::mem::offset_of!(GcBox<T>, header)
-                ) as *mut GcBox<T>;
-                
+                let gc_box_ptr =
+                    (ptr as *mut u8).sub(std::mem::offset_of!(GcBox<T>, header)) as *mut GcBox<T>;
+
                 let _box = Box::from_raw(gc_box_ptr);
                 // Box drops T here
             }
         }
-        
+
         Self {
-            trace: trace_impl::<T>,
+            trace: if T::NO_TRACE {
+                trace_noop
+            } else {
+                trace_impl::<T>
+            },
             drop: drop_impl::<T>,
             layout: Layout::new::<GcBox<T>>(),
         }
@@ -77,13 +86,12 @@ pub struct GcHeader {
 }
 
 impl GcHeader {
-    pub fn new<T: Trace>() -> Self {
-        // Leak a vtable for this type (in production, we'd cache these)
-        let vtable = Box::leak(Box::new(GcVTable::new::<T>()));
-        
+    // TODO: Combine `color` and `root_count` by using bit-patterns or avoid having a seperate `root_count` at all.
+    #[inline]
+    fn new(vtable: &'static GcVTable) -> Self {
         Self {
             color: AtomicColor::new(Color::White),
-            root_count: AtomicUsize::new(1),  // Start at 1 - already rooted! (allocation safety)
+            root_count: AtomicUsize::new(1), // Start at 1 - already rooted! (allocation safety)
             next: AtomicPtr::new(null_mut()),
             vtable,
         }
@@ -100,12 +108,18 @@ impl GcHeader {
     pub fn is_root(&self) -> bool {
         self.root_count.load(Ordering::Relaxed) > 0
     }
+
+    /// Check if the object is collectable after all reachable objects have been transitioned from white & gray to black:
+    /// (White and not a root)
+    pub fn is_white(&self) -> bool {
+        self.color.is_white() && !self.is_root()
+    }
 }
 
 /// A garbage collected object with metadata
 ///
 /// `GcBox` wraps a value with GC metadata including color and root status.
-/// 
+///
 /// SAFETY: repr(C) ensures that `header` is always at offset 0, making it
 /// safe to cast between `*GcHeader` and `*GcBox<T>`.
 #[repr(C)]
@@ -115,16 +129,15 @@ pub struct GcBox<T: ?Sized> {
 }
 
 impl<T: Trace> GcBox<T> {
+    const VTABLE: GcVTable = GcVTable::new::<T>();
+
     /// Allocate a new GcBox using Box (idiomatic Rust!)
-    pub fn new(data: T) -> NonNull<GcBox<T>> {
-        // Compile-time assertion: header must be at offset 0 due to repr(C)
-        const _: () = assert!(std::mem::offset_of!(GcBox<()>, header) == 0);
-        
+    pub(crate) fn new(data: T) -> NonNull<GcBox<T>> {
         let gc_box = Box::new(GcBox {
-            header: GcHeader::new::<T>(),
+            header: GcHeader::new(&Self::VTABLE),
             data,
         });
-        
+
         // Leak the box to get a raw pointer
         NonNull::from(Box::leak(gc_box))
     }

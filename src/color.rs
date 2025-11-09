@@ -42,17 +42,16 @@ impl AtomicColor {
         }
     }
 
-    #[allow(dead_code)]
-    pub fn load(&self, ordering: Ordering) -> Color {
+    fn load(&self, ordering: Ordering) -> Color {
         Color::from(self.inner.load(ordering))
     }
 
-    pub fn store(&self, color: Color, ordering: Ordering) {
+    fn store(&self, color: Color, ordering: Ordering) {
         self.inner.store(color as u8, ordering);
     }
 
-    #[allow(dead_code)]
-    pub fn compare_exchange(
+    #[inline]
+    fn compare_exchange(
         &self,
         current: Color,
         new: Color,
@@ -63,5 +62,31 @@ impl AtomicColor {
             .compare_exchange(current as u8, new as u8, success, failure)
             .map(Color::from)
             .map_err(Color::from)
+    }
+
+    #[inline]
+    pub fn mark_white_to_gray(&self) -> bool {
+        self.compare_exchange(
+            Color::White,
+            Color::Gray,
+            Ordering::SeqCst,
+            Ordering::SeqCst,
+        )
+        .is_ok()
+    }
+
+    #[inline]
+    pub fn mark_black(&self) {
+        self.store(Color::Black, Ordering::Release);
+    }
+
+    #[inline]
+    pub fn reset_white(&self) {
+        self.store(Color::White, Ordering::Release);
+    }
+
+    #[inline]
+    pub fn is_white(&self) -> bool {
+        self.load(Ordering::Acquire) == Color::White
     }
 }
