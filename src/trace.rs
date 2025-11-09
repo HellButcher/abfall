@@ -13,7 +13,9 @@ use std::{
 
 /// A tracer for marking reachable objects
 ///
-/// Used during the mark phase to traverse the object graph
+/// Used during the mark phase to traverse the object graph.
+/// Each thread can have its own tracer that accumulates gray objects,
+/// which are then merged back to the shared gray queue.
 pub struct Tracer(UnsafeCell<Vec<*const GcHeader>>);
 
 impl Tracer {
@@ -21,9 +23,35 @@ impl Tracer {
     pub(crate) fn new() -> Self {
         Self(UnsafeCell::new(Vec::new()))
     }
-
+    /// Append this tracer's accumulated work to a destination
     pub(crate) fn append_to(&self, dest: &mut Vec<*const GcHeader>) {
         dest.append(unsafe { &mut *self.0.get() });
+    }
+
+    /// Steal work from a list of gray objects
+    pub(crate) fn steal_from(&self, mut num_items: usize, src: &mut Vec<*const GcHeader>) -> bool {
+        if src.is_empty() || num_items == 0 {
+            return false;
+        }
+        // move num_items from src to self
+        while num_items > 0 {
+            if let Some(item) = src.pop() {
+                unsafe { &mut *self.0.get() }.push(item);
+                num_items -= 1;
+            } else {
+                break;
+            }
+        }
+        true
+    }
+
+    /// Pop a gray object from local work queue
+    pub(crate) fn pop_work(&self) -> Option<*const GcHeader> {
+        unsafe { &mut *self.0.get() }.pop()
+    }
+
+    pub(crate) fn has_work(&self) -> bool {
+        !unsafe { &*self.0.get() }.is_empty()
     }
 
     /// Mark an object as reachable

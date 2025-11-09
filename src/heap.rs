@@ -164,6 +164,8 @@ pub struct Heap {
     phase: AtomicU8,
     /// Background GC thread handle
     bg_thread: StartStopJoinHandle,
+    /// Enable mutator assist during marking
+    assist_enabled: std::sync::atomic::AtomicBool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -174,6 +176,8 @@ pub struct GcOptions {
     pub collection_interval: Duration,
     /// Work budget for incremental marking steps in background collection
     pub incremental_work_budget: usize,
+    /// Work budget for mutator assist (0 = disabled)
+    pub assist_work_budget: usize,
     /// Percentage threshold for triggering collection
     ///
     /// This is the percentage of additional memory usage since the last collection
@@ -198,6 +202,7 @@ impl GcOptions {
     pub const DEFAULT: Self = Self {
         collection_interval: Duration::from_millis(100),
         incremental_work_budget: 100,
+        assist_work_budget: 5,
         threshold_percent: 30,
         threshold_shrink_percent: 30,
         min_threshold_bytes: 1024 * 1024,
@@ -206,6 +211,7 @@ impl GcOptions {
     pub const OFF: Self = Self {
         collection_interval: Duration::from_millis(0),
         incremental_work_budget: usize::MAX,
+        assist_work_budget: 0,
         threshold_percent: usize::MAX,
         threshold_shrink_percent: 0,
         min_threshold_bytes: usize::MAX,
@@ -294,6 +300,7 @@ impl Heap {
             threads: parking_lot::RwLock::new(ThreadList::new()),
             phase: AtomicU8::new(GcPhase::Idle as u8),
             bg_thread: StartStopJoinHandle::new(),
+            assist_enabled: std::sync::atomic::AtomicBool::new(false),
         });
 
         heap.start_background_collection();
@@ -302,6 +309,11 @@ impl Heap {
     }
 
     pub fn allocate<T: Trace>(&self, data: T) -> GcRoot<T> {
+        // Mutator assist: help with marking if enabled
+        if self.assist_enabled.load(Ordering::Relaxed) && self.options.assist_work_budget > 0 {
+            self.do_mark_incremental(self.options.assist_work_budget);
+        }
+
         let ptr = GcBox::new(data);
         let size = unsafe { (*ptr.as_ptr()).header.vtable.layout.size() };
 
@@ -379,23 +391,32 @@ impl Heap {
 
     /// Try to transition to marking phase
     fn try_start_marking(&self) -> bool {
-        self.phase
+        let success = self
+            .phase
             .compare_exchange(
                 GcPhase::Idle as u8,
                 GcPhase::Marking as u8,
                 Ordering::AcqRel,
                 Ordering::Acquire,
             )
-            .is_ok()
+            .is_ok();
+
+        if success {
+            self.assist_enabled.store(true, Ordering::Release);
+        }
+
+        success
     }
 
     /// Transition to sweeping phase
     fn start_sweeping(&self) {
+        self.assist_enabled.store(false, Ordering::Release);
         self.phase.store(GcPhase::Sweeping as u8, Ordering::Release);
     }
 
     /// Transition back to idle phase
     fn finish_gc(&self) {
+        self.assist_enabled.store(false, Ordering::Release);
         self.phase.store(GcPhase::Idle as u8, Ordering::Release);
     }
 
@@ -423,58 +444,73 @@ impl Heap {
         live_bytes
     }
 
+    /// Steal work from the shared gray queue into a tracer
+    ///
+    /// Returns true if work was stolen, false if queue is empty
+    fn steal_work(&self, tracer: &Tracer, max_items: usize) -> bool {
+        let mut gray_queue = self.gray_queue.lock();
+        tracer.steal_from(max_items, &mut gray_queue.0)
+    }
+
+    /// Merge tracer's local work back to the shared gray queue
+    fn merge_work(&self, tracer: &Tracer) {
+        let mut gray_queue = self.gray_queue.lock();
+        tracer.append_to(&mut gray_queue.0);
+    }
+
+    /// Process marking work using a tracer
+    ///
+    /// Steals work, processes it locally, then merges new work back
+    fn do_mark_with_tracer(&self, tracer: &Tracer, work_budget: usize) -> usize {
+        let mut work_done = 0;
+
+        while work_done < work_budget {
+            // Try to get work from tracer's local queue first
+            let ptr = if let Some(p) = tracer.pop_work() {
+                p
+            } else {
+                // Local queue empty, try to steal from shared queue
+                const BATCH_SIZE: usize = 8;
+                if !self.steal_work(tracer, BATCH_SIZE) {
+                    // No work available anywhere
+                    break;
+                }
+                continue;
+            };
+
+            // Process one object
+            unsafe {
+                let header = &*ptr;
+                (header.vtable.trace)(ptr, tracer);
+                header.color.mark_black();
+            }
+
+            work_done += 1;
+        }
+
+        // Merge any newly discovered work back to shared queue
+        if tracer.has_work() {
+            self.merge_work(tracer);
+        }
+
+        work_done
+    }
+
     /// Perform a bounded amount of incremental marking work
     ///
     /// Returns true if marking is complete, false if more work remains
     fn do_mark_incremental(&self, work_budget: usize) -> bool {
-        let mut gray_queue = self.gray_queue.lock();
-        let mut work_done = 0;
-
         let tracer = Tracer::new();
-        // TODO: merge global gray and task local queues to tracer
-        while work_done < work_budget {
-            match gray_queue.pop() {
-                Some(ptr) => {
-                    unsafe {
-                        let header = &*ptr;
+        let work_done = self.do_mark_with_tracer(&tracer, work_budget);
 
-                        (header.vtable.trace)(ptr, &tracer);
-
-                        // Merge tracer's gray queue
-                        tracer.append_to(&mut gray_queue.0);
-
-                        // Mark as black
-                        header.color.mark_black();
-
-                        work_done += 1;
-                    }
-                }
-                None => {
-                    // No more work - marking is complete
-                    return true;
-                }
-            }
-        }
-
-        // More work remains
-        false
+        // If we did no work, marking is complete
+        work_done == 0
     }
 
     fn do_mark_work_full(&self, tracer: &Tracer) {
-        let mut gray_queue = self.gray_queue.lock();
-
-        while let Some(ptr) = gray_queue.pop() {
-            unsafe {
-                let header = &*ptr;
-
-                (header.vtable.trace)(ptr, tracer);
-
-                // Merge tracer's gray queue
-                tracer.append_to(&mut gray_queue.0);
-
-                // Mark as black
-                header.color.mark_black();
-            }
+        // Process until all work is complete
+        while self.do_mark_with_tracer(tracer, self.options.incremental_work_budget) > 0 {
+            // Keep going until no more work
         }
     }
 
@@ -491,8 +527,8 @@ impl Heap {
             }
         }
 
-        let mut gray_queue = self.gray_queue.lock();
-        tracer.append_to(&mut gray_queue.0);
+        // Merge roots into shared gray queue
+        self.merge_work(tracer);
     }
 
     fn do_sweep(&self) -> usize {
