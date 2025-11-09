@@ -173,7 +173,7 @@ pub struct GcOptions {
     /// If set to 0, background collection is disabled
     pub collection_interval: Duration,
     /// Work budget for incremental marking steps in background collection
-    pub incremental_work_buget: usize,
+    pub incremental_work_budget: usize,
     /// Percentage threshold for triggering collection
     ///
     /// This is the percentage of additional memory usage since the last collection
@@ -197,7 +197,7 @@ pub struct GcOptions {
 impl GcOptions {
     pub const DEFAULT: Self = Self {
         collection_interval: Duration::from_millis(100),
-        incremental_work_buget: 100,
+        incremental_work_budget: 100,
         threshold_percent: 30,
         threshold_shrink_percent: 30,
         min_threshold_bytes: 1024 * 1024,
@@ -205,7 +205,7 @@ impl GcOptions {
     };
     pub const OFF: Self = Self {
         collection_interval: Duration::from_millis(0),
-        incremental_work_buget: usize::MAX,
+        incremental_work_budget: usize::MAX,
         threshold_percent: usize::MAX,
         threshold_shrink_percent: 0,
         min_threshold_bytes: usize::MAX,
@@ -609,7 +609,7 @@ fn background_gc_thread(heap: Arc<Heap>, c: StopCondition) {
                 }
 
                 let marking_complete =
-                    heap.do_mark_incremental(heap.options.incremental_work_buget);
+                    heap.do_mark_incremental(heap.options.incremental_work_budget);
                 if marking_complete {
                     break;
                 }
