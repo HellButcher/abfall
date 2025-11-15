@@ -9,7 +9,7 @@ parking_lot = "0.12.5"
 v8 = { version = "0.84", optional = true }
 
 [dev-dependencies]
-criterion = "0.5"
+criterion = "0.7"
 dumpster = { version = "1.2.0" }
 dumpster_derive = { version = "1.1.0" }
 
