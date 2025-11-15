@@ -6,7 +6,7 @@ license = "MIT OR Apache-2.0"
 
 [dependencies]
 parking_lot = "0.12.5"
-v8 = { version = "0.84", optional = true }
+v8 = { version = "142.1", optional = true }
 
 [dev-dependencies]
 criterion = "0.5"
