@@ -375,8 +375,7 @@ impl Heap {
 
     /// Try to transition to marking phase
     fn try_start_marking(&self) -> bool {
-        self
-            .phase
+        self.phase
             .compare_exchange(
                 GcPhase::Idle as u8,
                 GcPhase::Marking as u8,
@@ -483,7 +482,7 @@ impl Heap {
         work_done == 0
     }
 
-    fn yield_once_if_marking_busy(&self) -> bool{
+    fn yield_once_if_marking_busy(&self) -> bool {
         if self.n_busy_marking.load(Ordering::Acquire) > 0 {
             std::thread::yield_now();
             true
@@ -494,7 +493,9 @@ impl Heap {
 
     fn do_mark_work_full(&self, tracer: &Tracer) {
         // Process until all work is complete
-        while self.do_mark_with_tracer(tracer, self.options.incremental_work_budget) > 0 || self.yield_once_if_marking_busy() {
+        while self.do_mark_with_tracer(tracer, self.options.incremental_work_budget) > 0
+            || self.yield_once_if_marking_busy()
+        {
             // Keep going until no more work
         }
     }
@@ -636,7 +637,6 @@ fn background_gc_thread(heap: Arc<Heap>, c: StopCondition) {
                         break;
                     }
                 } else {
-
                     // Yield to allow mutators to make progress
                     std::thread::yield_now();
                 }
@@ -647,4 +647,3 @@ fn background_gc_thread(heap: Arc<Heap>, c: StopCondition) {
         }
     }
 }
-

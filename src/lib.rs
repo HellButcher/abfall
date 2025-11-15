@@ -39,7 +39,7 @@ mod trace;
 
 pub use cell::GcCell;
 pub use gc::GcContext;
-pub use heap::{Heap, GcOptions};
+pub use heap::{GcOptions, Heap};
 pub use ptr::{GcPtr, GcRoot};
 pub use trace::{Trace, Tracer};
 
