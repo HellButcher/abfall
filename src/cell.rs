@@ -7,7 +7,7 @@
 //! they cannot contain GC pointers and don't need write barriers.
 
 use crate::{
-    gc::with_current_tracer,
+    gc::with_current_context,
     trace::{Trace, Tracer},
 };
 use std::cell::UnsafeCell;
@@ -46,8 +46,13 @@ impl<T: Trace + Copy> GcCell<T> {
         // (To avoid race-conditions, we don't check is_marking here; overhead should be minimal)
         unsafe {
             let new_ref = &new_value;
-            with_current_tracer(|tracer| {
-                new_ref.trace(tracer);
+            with_current_context(|ctx| {
+                if ctx.heap.check_is_marking_and_increment_busy() {
+                    // Trace new value to shade it gray
+                    new_ref.trace(&ctx.local_gray);
+                    ctx.heap.merge_work(&ctx.local_gray);
+                    ctx.heap.decrement_busy_marking();
+                }
             });
             *self.value.get() = new_value;
         }

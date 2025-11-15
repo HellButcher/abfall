@@ -36,7 +36,7 @@ fn reset_current_context(ctx: &Pin<Box<GcContextInner>>) {
     });
 }
 
-pub(crate) fn with_current_tracer(f: impl FnOnce(&Tracer)) -> bool {
+pub(crate) fn with_current_context(f: impl FnOnce(&GcContextInner)) -> bool {
     CURRENT_CTX.with(|tls| {
         let ctx_ptr = tls.get();
         if ctx_ptr.is_null() {
@@ -44,21 +44,16 @@ pub(crate) fn with_current_tracer(f: impl FnOnce(&Tracer)) -> bool {
         } else {
             // SAFETY: ctx_ptr is valid as long as the GcContext is alive
             let ctx = unsafe { &*ctx_ptr };
-            f(&ctx.local_gray);
+            f(&ctx);
             true
         }
     })
 }
 
 pub(crate) struct GcContextInner {
-    heap: Arc<Heap>,
-    local_gray: Tracer,
-    shared: GcContextHeapShared,
+    pub heap: Arc<Heap>,
+    pub local_gray: Tracer,
     _marker: std::marker::PhantomData<*const ()>, // Makes GcContext !Send + !Sync
-}
-
-pub(crate) struct GcContextHeapShared {
-    // TODO: fields that are shared with the Heap
 }
 
 /// RAII guard for GC context
@@ -143,13 +138,8 @@ impl GcContext {
         let inner = Box::pin(GcContextInner {
             heap,
             local_gray: Tracer::new(),
-            shared: GcContextHeapShared {
-                // Initialize shared fields
-            },
             _marker: std::marker::PhantomData,
         });
-        let inner_ref: &GcContextInner = inner.as_ref().get_ref();
-        inner_ref.shared.register_with_heap(inner.heap.as_ref());
         set_current_context(&inner);
         GcContext(inner)
     }
@@ -184,7 +174,6 @@ impl Drop for GcContext {
     fn drop(&mut self) {
         // Clear thread-local heap when context is dropped
         reset_current_context(&self.0);
-        self.0.shared.unregister_from_heap(self.0.heap.as_ref());
     }
 }
 

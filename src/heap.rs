@@ -3,7 +3,6 @@
 //! This module provides the heap structure that stores GC-managed objects
 //! and implements the mark and sweep phases of garbage collection.
 
-use crate::gc::GcContextHeapShared;
 use crate::gc_box::{GcBox, GcHeader};
 use crate::ptr::GcRoot;
 use crate::trace::{Trace, Tracer};
@@ -22,33 +21,6 @@ unsafe impl Sync for GrayQueue {}
 impl GrayQueue {
     fn new() -> Self {
         Self(Vec::new())
-    }
-
-    fn pop(&mut self) -> Option<*const GcHeader> {
-        self.0.pop()
-    }
-}
-
-/// Send-safe list of threads associated with the heap
-struct ThreadList(Vec<*const GcContextHeapShared>);
-
-unsafe impl Send for ThreadList {}
-unsafe impl Sync for ThreadList {}
-
-impl ThreadList {
-    #[inline]
-    const fn new() -> Self {
-        Self(Vec::new())
-    }
-
-    fn add(&mut self, thread: *const GcContextHeapShared) {
-        self.0.push(thread);
-    }
-
-    fn remove(&mut self, thread: *const GcContextHeapShared) {
-        if let Some(i) = self.0.iter().position(|&t| t.addr() == thread.addr()) {
-            self.0.swap_remove(i);
-        }
     }
 }
 
@@ -158,14 +130,12 @@ pub struct Heap {
     current_threshold: AtomicUsize,
     /// Gray queue for incremental marking
     gray_queue: parking_lot::Mutex<GrayQueue>,
-    /// Associated Threads
-    threads: parking_lot::RwLock<ThreadList>,
     /// Current GC phase
     phase: AtomicU8,
     /// Background GC thread handle
     bg_thread: StartStopJoinHandle,
-    /// Enable mutator assist during marking
-    assist_enabled: std::sync::atomic::AtomicBool,
+    /// Number of Assist mutators or write-barriers active
+    n_busy_marking: std::sync::atomic::AtomicUsize,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -297,10 +267,9 @@ impl Heap {
             bytes_allocated: AtomicUsize::new(0),
             current_threshold,
             gray_queue: parking_lot::Mutex::new(GrayQueue::new()),
-            threads: parking_lot::RwLock::new(ThreadList::new()),
             phase: AtomicU8::new(GcPhase::Idle as u8),
             bg_thread: StartStopJoinHandle::new(),
-            assist_enabled: std::sync::atomic::AtomicBool::new(false),
+            n_busy_marking: std::sync::atomic::AtomicUsize::new(0),
         });
 
         heap.start_background_collection();
@@ -310,8 +279,9 @@ impl Heap {
 
     pub fn allocate<T: Trace>(&self, data: T) -> GcRoot<T> {
         // Mutator assist: help with marking if enabled
-        if self.assist_enabled.load(Ordering::Relaxed) && self.options.assist_work_budget > 0 {
+        if self.options.assist_work_budget > 0 && self.check_is_marking_and_increment_busy() {
             self.do_mark_incremental(self.options.assist_work_budget);
+            self.decrement_busy_marking();
         }
 
         let ptr = GcBox::new(data);
@@ -389,9 +359,23 @@ impl Heap {
         GcPhase::from(self.phase.load(Ordering::Acquire)) == GcPhase::Marking
     }
 
+    pub fn check_is_marking_and_increment_busy(&self) -> bool {
+        self.n_busy_marking.fetch_add(1, Ordering::AcqRel);
+        if self.is_marking() {
+            true
+        } else {
+            self.n_busy_marking.fetch_sub(1, Ordering::AcqRel);
+            false
+        }
+    }
+
+    pub fn decrement_busy_marking(&self) {
+        self.n_busy_marking.fetch_sub(1, Ordering::AcqRel);
+    }
+
     /// Try to transition to marking phase
     fn try_start_marking(&self) -> bool {
-        let success = self
+        self
             .phase
             .compare_exchange(
                 GcPhase::Idle as u8,
@@ -399,24 +383,16 @@ impl Heap {
                 Ordering::AcqRel,
                 Ordering::Acquire,
             )
-            .is_ok();
-
-        if success {
-            self.assist_enabled.store(true, Ordering::Release);
-        }
-
-        success
+            .is_ok()
     }
 
     /// Transition to sweeping phase
     fn start_sweeping(&self) {
-        self.assist_enabled.store(false, Ordering::Release);
         self.phase.store(GcPhase::Sweeping as u8, Ordering::Release);
     }
 
     /// Transition back to idle phase
     fn finish_gc(&self) {
-        self.assist_enabled.store(false, Ordering::Release);
         self.phase.store(GcPhase::Idle as u8, Ordering::Release);
     }
 
@@ -453,7 +429,7 @@ impl Heap {
     }
 
     /// Merge tracer's local work back to the shared gray queue
-    fn merge_work(&self, tracer: &Tracer) {
+    pub(crate) fn merge_work(&self, tracer: &Tracer) {
         let mut gray_queue = self.gray_queue.lock();
         tracer.append_to(&mut gray_queue.0);
     }
@@ -507,9 +483,18 @@ impl Heap {
         work_done == 0
     }
 
+    fn yield_once_if_marking_busy(&self) -> bool{
+        if self.n_busy_marking.load(Ordering::Acquire) > 0 {
+            std::thread::yield_now();
+            true
+        } else {
+            false
+        }
+    }
+
     fn do_mark_work_full(&self, tracer: &Tracer) {
         // Process until all work is complete
-        while self.do_mark_with_tracer(tracer, self.options.incremental_work_budget) > 0 {
+        while self.do_mark_with_tracer(tracer, self.options.incremental_work_budget) > 0 || self.yield_once_if_marking_busy() {
             // Keep going until no more work
         }
     }
@@ -647,11 +632,14 @@ fn background_gc_thread(heap: Arc<Heap>, c: StopCondition) {
                 let marking_complete =
                     heap.do_mark_incremental(heap.options.incremental_work_budget);
                 if marking_complete {
-                    break;
-                }
+                    if !heap.yield_once_if_marking_busy() {
+                        break;
+                    }
+                } else {
 
-                // Yield to allow mutators to make progress
-                std::thread::yield_now();
+                    // Yield to allow mutators to make progress
+                    std::thread::yield_now();
+                }
             }
 
             // Sweeping phase and finish
@@ -660,14 +648,3 @@ fn background_gc_thread(heap: Arc<Heap>, c: StopCondition) {
     }
 }
 
-impl GcContextHeapShared {
-    pub(crate) fn register_with_heap(&self, heap: &Heap) {
-        let mut threads = heap.threads.write();
-        threads.add(self as *const _);
-    }
-
-    pub(crate) fn unregister_from_heap(&self, heap: &Heap) {
-        let mut threads = heap.threads.write();
-        threads.remove(self as *const _);
-    }
-}
