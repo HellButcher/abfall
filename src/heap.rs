@@ -221,7 +221,7 @@ impl GcOptions {
     /// pacing
     fn calculate_threshold(&self, old_threshold: usize, live_usage: usize) -> usize {
         if self.is_threshold_off() {
-            return usize::MAX;
+            usize::MAX
         } else {
             let new_threshold = live_usage + (live_usage * self.threshold_percent) / 100;
             if new_threshold < old_threshold {
@@ -235,9 +235,9 @@ impl GcOptions {
                 }
             }
             if new_threshold < self.min_threshold_bytes {
-                return self.min_threshold_bytes;
+                self.min_threshold_bytes
             } else {
-                return new_threshold;
+                new_threshold
             }
         }
     }

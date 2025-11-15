@@ -44,7 +44,7 @@ pub(crate) fn with_current_context(f: impl FnOnce(&GcContextInner)) -> bool {
         } else {
             // SAFETY: ctx_ptr is valid as long as the GcContext is alive
             let ctx = unsafe { &*ctx_ptr };
-            f(&ctx);
+            f(ctx);
             true
         }
     })
