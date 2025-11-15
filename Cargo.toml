@@ -3,6 +3,14 @@ name = "abfall"
 version = "0.1.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
+description = "Concurrent tri-color tracing garbage collector for Rust with incremental and concurrent mark-sweep"
+readme = "README.md"
+homepage = "https://github.com/HellButcher/abfall"
+repository = "https://github.com/HellButcher/abfall"
+documentation = "https://docs.rs/abfall"
+keywords = ["garbage-collector","gc","concurrency","memory","tri-color"]
+categories = ["memory-management","concurrency"]
+rust-version = "1.90"
 
 [dependencies]
 parking_lot = "0.12.5"
