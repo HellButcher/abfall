@@ -14,16 +14,11 @@ rust-version = "1.90"
 
 [dependencies]
 parking_lot = "0.12.5"
-v8 = { version = "0.84", optional = true }
 
 [dev-dependencies]
-criterion = "0.5"
-dumpster = { version = "1.2.0" }
-dumpster_derive = { version = "1.1.0" }
-
-[features]
-compare_dumpster = []
-compare_cppgc = ["v8"]
+criterion = "0.7"
+dumpster = "1.2.0"
+dumpster_derive = "1.1.0"
 
 [[bench]]
 name = "gc_bench"
