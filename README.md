@@ -94,81 +94,27 @@ for handle in handles {
 }
 ```
 
-## API
-
-### `GcContext`
-
-The main garbage collector context.
-
-- `GcContext::new()` - Create with automatic background collection
-- `GcContext::with_options(background: bool, interval: Duration)` - Create with custom options
-- `allocate<T>(data: T) -> GcPtr<T>` - Allocate an object on the GC heap
-- `collect()` - Manually trigger a collection cycle
-- `bytes_allocated() -> usize` - Get current heap size
-- `allocation_count() -> usize` - Get number of live allocations
-
-### `GcPtr<T>`
-
-Smart pointer to GC-managed memory.
-
-- Implements `Deref` for transparent access
-- Implements `Clone` - cloned pointers keep the object alive
-- Implements `Send + Sync` (when T implements them)
-- Automatically manages root set membership
-
-## Implementation Details
-
-### Memory Safety
-
-- Uses `NonNull` pointers internally for safe null checks
-- Atomic operations for thread-safe color updates
-- Mutex-protected allocation tracking
-
-### Root Set Management
-
-Objects are considered roots when:
-- At least one `GcPtr` points to them
-- When all `GcPtr`s are dropped, the object leaves the root set
-- Objects outside the root set become collection candidates
-
-### Concurrent Collection
-
-- Background thread wakes periodically to check if collection is needed
-- Collection is triggered when heap size exceeds threshold
-- Uses atomic flags to prevent concurrent collections
-- Read barriers ensure consistency during concurrent marking
-
-## Performance Characteristics
-
-- **Allocation**: O(1) - simple bump allocation with lock
-- **Collection Time**: O(n) where n is the number of live objects
-- **Space Overhead**: Additional metadata per object (color, mark bit, root flag)
-- **Pause Time**: Concurrent collection minimizes application pauses
-
-## Limitations
-
-- Currently doesn't support cyclic garbage (objects with circular references)
-- No generational collection optimization
-- Fixed collection threshold (1MB by default)
-- Background thread cannot be gracefully stopped
-
-## Future Improvements
-
-- Generational collection for improved performance
-- Incremental marking to reduce pause times
-- Configurable collection thresholds
-- Cycle detection for reference cycles
-- Write barriers for more sophisticated concurrent collection
-
-## Safety
-
-This library uses `unsafe` code for manual memory management. The safety invariants are:
-
-1. All allocated objects remain valid until explicitly deallocated
-2. Objects in the root set are never collected
-3. Atomic operations ensure thread-safe color transitions
-4. Mutex protects allocation list during concurrent access
-
 ## License
 
-This is a demonstration project for educational purposes.
+[license]: #license
+
+This project is licensed under either of
+
+* MIT license ([LICENSE-MIT] or <http://opensource.org/licenses/MIT>)
+* Apache License, Version 2.0, ([LICENSE-APACHE] or <http://www.apache.org/licenses/LICENSE-2.0>)
+
+at your option
+
+Unless you explicitly state otherwise, any contribution intentionally submitted
+for inclusion in the work by you, as defined in the Apache-2.0 license, shall be
+dual licensed as above, without any additional terms or conditions.
+
+[LICENSE-MIT]: LICENSE-MIT
+[LICENSE-APACHE]: LICENSE-APACHE
+
+### Contribution
+
+Unless you explicitly state otherwise, any contribution intentionally
+submitted for inclusion in the project by you shall be dual licensed as above,
+without additional terms or conditions.
+
