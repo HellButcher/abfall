@@ -16,7 +16,7 @@ rust-version = "1.90"
 parking_lot = "0.12.5"
 
 [dev-dependencies]
-criterion = "0.7"
+criterion = "0.8"
 dumpster = "1.2.0"
 dumpster_derive = "1.1.0"
 
