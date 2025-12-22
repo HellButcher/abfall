@@ -8,7 +8,7 @@ version = "0.1.0"
 dependencies = [
  "criterion",
  "dumpster",
- "dumpster_derive",
+ "dumpster_derive 1.1.0",
  "parking_lot",
 ]
 
@@ -191,11 +191,11 @@ checksum = "460fbee9c2c2f33933d720630a6a0bac33ba7053db5344fac858d4b8952d77d5"
 
 [[package]]
 name = "dumpster"
-version = "1.2.0"
+version = "2.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6c910a21c1e1dbe76c7d1cbd58989983af802999637152488a779d6544abc993"
+checksum = "07359778d3b6b5729ddb2751b229cb0ae84880579fb8eeabb2f5e627a6e28ed4"
 dependencies = [
- "dumpster_derive",
+ "dumpster_derive 2.0.0",
  "loom",
  "parking_lot",
 ]
@@ -205,6 +205,17 @@ name = "dumpster_derive"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bb960d3bd081f2b17973fb33fc50c31a0cf0e90513e9962b41858306b35fd45c"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
+name = "dumpster_derive"
+version = "2.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c9d846a530d39b6eba9a28eb3682c622cf96c8e54548bf5831e8bf4935c3dd2b"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -309,8 +320,6 @@ dependencies = [
  "cfg-if",
  "generator",
  "scoped-tls",
- "serde",
- "serde_json",
  "tracing",
  "tracing-subscriber",
 ]
