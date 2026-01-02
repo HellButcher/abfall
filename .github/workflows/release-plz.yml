@@ -27,12 +27,22 @@ jobs:
       - &install-rust
         name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+      - &generate-token
+        name: Generate GitHub token
+        uses: actions/create-github-app-token@v2
+        id: generate-token
+        with:
+          # GitHub App ID secret name
+          app-id: ${{ secrets.RELEASE_PLZ_APP_ID }}
+          # GitHub App private key secret name
+          private-key: ${{ secrets.RELEASE_PLZ_APP_PRIVATE_KEY }}
       - name: Run release-plz
         uses: release-plz/action@v0.5
         with:
           command: release
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ steps.generate-token.outputs.token }}
+          #GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           #CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
   # Create a PR with the new versions and changelog, preparing the next release.
@@ -50,22 +60,13 @@ jobs:
     steps:
       - *checkout
       - *install-rust
+      - *generate-token
       - name: Run release-plz
         uses: release-plz/action@v0.5
         id: release-plz
         with:
           command: release-pr
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ steps.generate-token.outputs.token }}
+          #GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           #CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-      - name: Trigger Workflow
-        uses: actions/github-script@v6
-        if: ${{ steps.release-plz.outputs.prs_created == 'true' }}
-        with:
-          script: |
-            github.rest.actions.createWorkflowDispatch({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              workflow_id: 'rust.yml',
-              ref: '${{ fromJSON(steps.release-plz.outputs.pr).head_branch }}',
-            })
