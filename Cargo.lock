@@ -202,9 +202,9 @@ checksum = "460fbee9c2c2f33933d720630a6a0bac33ba7053db5344fac858d4b8952d77d5"
 
 [[package]]
 name = "dumpster"
-version = "2.0.0"
+version = "2.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "07359778d3b6b5729ddb2751b229cb0ae84880579fb8eeabb2f5e627a6e28ed4"
+checksum = "bcb58706890edf17f8ea4e547867910939edabf1c6b307aa6e6781697e10642b"
 dependencies = [
  "dumpster_derive",
  "loom",
