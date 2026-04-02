@@ -17,7 +17,7 @@ parking_lot = "0.12.5"
 
 [dev-dependencies]
 criterion = "0.8"
-dumpster = "2.0.0"
+dumpster = "2.1.0"
 dumpster_derive = "2.0.0"
 
 [[bench]]
