@@ -29,7 +29,7 @@ jobs:
         rustup toolchain install ${{ matrix.channel }} --no-self-update --profile minimal -c "clippy,rustfmt"
         rustup default ${{ matrix.channel }}
     - name: Cache cargo registry & index
-      uses: actions/cache@v3
+      uses: actions/cache@v6
       with:
         path: |
           ~/.cargo/registry
@@ -48,7 +48,7 @@ jobs:
     steps:
       - uses: actions/checkout@v3
       - name: Cache cargo registry & index
-        uses: actions/cache@v3
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
