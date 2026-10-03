@@ -14,35 +14,26 @@ jobs:
     if: ${{ github.repository_owner == 'HellButcher' }}
     permissions:
       contents: write
+      pull-requests: read
       id-token: write
     environment:
       name: crates.io
     steps:
       - &checkout
         name: Checkout repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           fetch-depth: 0
           persist-credentials: false
       - &install-rust
         name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
-      - &generate-token
-        name: Generate GitHub token
-        uses: actions/create-github-app-token@v2
-        id: generate-token
-        with:
-          # GitHub App ID secret name
-          app-id: ${{ secrets.RELEASE_PLZ_APP_ID }}
-          # GitHub App private key secret name
-          private-key: ${{ secrets.RELEASE_PLZ_APP_PRIVATE_KEY }}
       - name: Run release-plz
-        uses: release-plz/action@v0.5
+        uses: release-plz/action@b8d6b54b02889ff2ae2bb82e8b57c3a8fc1683a5 # v0.5.139
         with:
           command: release
         env:
-          GITHUB_TOKEN: ${{ steps.generate-token.outputs.token }}
-          #GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           #CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
   # Create a PR with the new versions and changelog, preparing the next release.
@@ -62,11 +53,10 @@ jobs:
       - *install-rust
       - *generate-token
       - name: Run release-plz
-        uses: release-plz/action@v0.5
+        uses: release-plz/action@b8d6b54b02889ff2ae2bb82e8b57c3a8fc1683a5 # v0.5.139
         id: release-plz
         with:
           command: release-pr
         env:
-          GITHUB_TOKEN: ${{ steps.generate-token.outputs.token }}
-          #GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          #CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
