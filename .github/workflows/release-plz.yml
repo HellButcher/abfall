@@ -21,20 +21,21 @@ jobs:
     steps:
       - &checkout
         name: Checkout repository
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
       - &install-rust
-        name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        name: Install Toolchain
+        run: |
+          rustup toolchain update stable --profile minimal
+          rustup default stable
       - name: Run release-plz
         uses: release-plz/action@b8d6b54b02889ff2ae2bb82e8b57c3a8fc1683a5 # v0.5.139
         with:
           command: release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          #CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
   # Create a PR with the new versions and changelog, preparing the next release.
   release-plz-pr:
@@ -51,7 +52,6 @@ jobs:
     steps:
       - *checkout
       - *install-rust
-      - *generate-token
       - name: Run release-plz
         uses: release-plz/action@b8d6b54b02889ff2ae2bb82e8b57c3a8fc1683a5 # v0.5.139
         id: release-plz
